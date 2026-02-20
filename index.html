@@ -241,12 +241,40 @@
 
         loadedSvg = document.importNode(svg, true);
         loadedSvg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+        ensurePreviewSize(loadedSvg);
 
         svgStage.innerHTML = '';
         svgStage.appendChild(loadedSvg);
 
         const shapeCount = loadedSvg.querySelectorAll(shapeSelector).length;
         setStatus(`Loaded ${filename}. Found ${shapeCount} drawable shapes.`);
+      }
+
+      function ensurePreviewSize(svg) {
+        const width = (svg.getAttribute('width') || '').trim();
+        const height = (svg.getAttribute('height') || '').trim();
+        const widthIsPercent = width.endsWith('%');
+        const heightIsPercent = height.endsWith('%');
+
+        if (!width || widthIsPercent || !height || heightIsPercent) {
+          const viewBox = (svg.getAttribute('viewBox') || '').trim().split(/\s+/).map(Number);
+          if (viewBox.length === 4 && Number.isFinite(viewBox[2]) && Number.isFinite(viewBox[3])) {
+            svg.setAttribute('width', String(viewBox[2]));
+            svg.setAttribute('height', String(viewBox[3]));
+            return;
+          }
+
+          try {
+            const box = svg.getBBox();
+            if (box.width > 0 && box.height > 0) {
+              svg.setAttribute('viewBox', `${box.x} ${box.y} ${box.width} ${box.height}`);
+              svg.setAttribute('width', String(box.width));
+              svg.setAttribute('height', String(box.height));
+            }
+          } catch {
+            // Keep original dimensions if browser cannot measure yet.
+          }
+        }
       }
 
       function handleFile(file) {
