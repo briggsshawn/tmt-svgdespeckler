@@ -289,11 +289,23 @@
       }
 
       function handleFile(file) {
-        if (!file || !file.name.toLowerCase().endsWith('.svg')) {
-          setStatus('Please provide a .svg file.');
+        if (!file) {
+          setStatus('Please provide an SVG file.');
           return;
         }
-        file.text().then((content) => loadSvgText(content, file.name));
+
+        const looksLikeSvg = file.name.toLowerCase().endsWith('.svg') || file.type === 'image/svg+xml';
+
+        file
+          .text()
+          .then((content) => {
+            if (!looksLikeSvg && !content.includes('<svg')) {
+              setStatus('That file does not look like SVG content.');
+              return;
+            }
+            loadSvgText(content, file.name || 'SVG');
+          })
+          .catch(() => setStatus('Unable to read that file.'));
       }
 
       ['dragenter', 'dragover'].forEach((eventName) => {
