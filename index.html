@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SVG Despeckler</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --panel: #1e1e1e;
+        --bg: #111;
+        --drop: #222;
+        --accent: #4da3ff;
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+        background: var(--bg);
+        color: #f3f3f3;
+        display: grid;
+        grid-template-columns: 320px 1fr;
+        min-height: 100vh;
+      }
+
+      .sidebar {
+        background: var(--panel);
+        padding: 1rem;
+        border-right: 1px solid #333;
+        overflow-y: auto;
+      }
+
+      h1 { font-size: 1.1rem; margin-top: 0; }
+      .hint { color: #aaa; font-size: .85rem; }
+
+      .group { margin-bottom: 1rem; }
+      label { display: block; font-size: .85rem; margin-bottom: .35rem; }
+      input[type="number"], button {
+        width: 100%;
+        padding: .6rem;
+        border: 1px solid #444;
+        background: #151515;
+        color: #fff;
+        border-radius: .45rem;
+      }
+
+      input[type="checkbox"] { transform: translateY(1px); }
+
+      .row {
+        display: flex;
+        gap: .5rem;
+      }
+
+      .row > * { flex: 1; }
+
+      button {
+        cursor: pointer;
+        background: #2a2a2a;
+      }
+
+      button:hover { border-color: #666; }
+
+      .primary {
+        background: var(--accent);
+        border-color: #2e78c7;
+      }
+
+      .viewer {
+        position: relative;
+        overflow: hidden;
+        display: grid;
+      }
+
+      #dropZone {
+        margin: 1rem;
+        border: 2px dashed #4b4b4b;
+        border-radius: .75rem;
+        background: var(--drop);
+        display: grid;
+        place-items: center;
+        min-height: 200px;
+        color: #b8b8b8;
+      }
+
+      #dropZone.dragover {
+        border-color: var(--accent);
+        color: #fff;
+      }
+
+      #canvasWrap {
+        margin: 0 1rem 1rem;
+        border: 1px solid #333;
+        background: #080808;
+        border-radius: .75rem;
+        overflow: auto;
+        min-height: 60vh;
+      }
+
+      #svgStage {
+        transform-origin: top left;
+        width: fit-content;
+        min-height: 100%;
+        padding: 1rem;
+      }
+
+      #svgStage svg { max-width: none; }
+
+      .status {
+        font-size: .8rem;
+        color: #9f9f9f;
+        margin-top: .4rem;
+      }
+    </style>
+  </head>
+  <body>
+    <aside class="sidebar">
+      <h1>SVG Despeckler</h1>
+      <p class="hint">Drop an SVG onto the page, then clean tiny speckles and nested noise paths.</p>
+
+      <div class="group">
+        <label for="fileInput">Open SVG file</label>
+        <input id="fileInput" type="file" accept=".svg,image/svg+xml" />
+      </div>
+
+      <div class="group">
+        <label for="minArea">Remove paths smaller than area (px²)</label>
+        <input id="minArea" type="number" min="0" value="18" step="1" />
+      </div>
+
+      <div class="group">
+        <label><input id="removeContained" type="checkbox" checked /> Remove paths contained inside another path</label>
+        <label><input id="respectCutouts" type="checkbox" checked /> Keep likely cutouts (different fill than container)</label>
+      </div>
+
+      <div class="group">
+        <button class="primary" id="despeckleBtn">Run despeckle</button>
+      </div>
+
+      <div class="group">
+        <label for="bgMergeColor">Background color to merge + push to back</label>
+        <div class="row">
+          <input id="bgMergeColor" type="color" value="#ffffff" />
+          <button id="mergeBgBtn">Merge background</button>
+        </div>
+      </div>
+
+      <div class="group">
+        <label>Zoom controls</label>
+        <div class="row">
+          <button id="zoomOut">-</button>
+          <button id="zoomReset">100%</button>
+          <button id="zoomIn">+</button>
+        </div>
+      </div>
+
+      <div id="status" class="status">No SVG loaded.</div>
+    </aside>
+
+    <main class="viewer">
+      <div id="dropZone">Drop SVG file here</div>
+      <div id="canvasWrap"><div id="svgStage"></div></div>
+    </main>
+
+    <script>
+      const dropZone = document.getElementById('dropZone');
+      const fileInput = document.getElementById('fileInput');
+      const svgStage = document.getElementById('svgStage');
+      const statusEl = document.getElementById('status');
+      const minAreaEl = document.getElementById('minArea');
+      const removeContainedEl = document.getElementById('removeContained');
+      const respectCutoutsEl = document.getElementById('respectCutouts');
+      const bgMergeColorEl = document.getElementById('bgMergeColor');
+      const despeckleBtn = document.getElementById('despeckleBtn');
+      const mergeBgBtn = document.getElementById('mergeBgBtn');
+      const zoomInBtn = document.getElementById('zoomIn');
+      const zoomOutBtn = document.getElementById('zoomOut');
+      const zoomResetBtn = document.getElementById('zoomReset');
+
+      let zoom = 1;
+      let loadedSvg = null;
+
+      const shapeSelector = 'path,rect,circle,ellipse,polygon,polyline';
+
+      function setStatus(message) {
+        statusEl.textContent = message;
+      }
+
+      function hexToRgb(hex) {
+        const v = hex.replace('#', '');
+        const full = v.length === 3 ? [...v].map((c) => c + c).join('') : v;
+        const int = Number.parseInt(full, 16);
+        return `rgb(${(int >> 16) & 255}, ${(int >> 8) & 255}, ${int & 255})`;
+      }
+
+      function normalizeColor(color) {
+        if (!color) return null;
+        const t = color.trim().toLowerCase();
+        if (t === 'none' || t === 'transparent') return null;
+        if (t.startsWith('#')) return hexToRgb(t);
+        return t.replace(/\s+/g, '');
+      }
+
+      function getComputedFill(el) {
+        const direct = normalizeColor(el.getAttribute('fill'));
+        if (direct) return direct;
+        const styleFill = normalizeColor(el.style.fill || '');
+        if (styleFill) return styleFill;
+        if (el.ownerSVGElement) {
+          const computed = getComputedStyle(el).fill;
+          return normalizeColor(computed);
+        }
+        return null;
+      }
+
+      function applyZoom() {
+        svgStage.style.transform = `scale(${zoom})`;
+        zoomResetBtn.textContent = `${Math.round(zoom * 100)}%`;
+      }
+
+      function clampZoom(value) {
+        return Math.max(0.1, Math.min(8, value));
+      }
+
+      function loadSvgText(text, filename = 'SVG') {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(text, 'image/svg+xml');
+        const svg = doc.querySelector('svg');
+
+        if (!svg) {
+          setStatus('That file did not contain an <svg> root element.');
+          return;
+        }
+
+        const parseError = doc.querySelector('parsererror');
+        if (parseError) {
+          setStatus('Unable to parse SVG.');
+          return;
+        }
+
+        loadedSvg = document.importNode(svg, true);
+        loadedSvg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+
+        svgStage.innerHTML = '';
+        svgStage.appendChild(loadedSvg);
+
+        const shapeCount = loadedSvg.querySelectorAll(shapeSelector).length;
+        setStatus(`Loaded ${filename}. Found ${shapeCount} drawable shapes.`);
+      }
+
+      function handleFile(file) {
+        if (!file || !file.name.toLowerCase().endsWith('.svg')) {
+          setStatus('Please provide a .svg file.');
+          return;
+        }
+        file.text().then((content) => loadSvgText(content, file.name));
+      }
+
+      ['dragenter', 'dragover'].forEach((eventName) => {
+        dropZone.addEventListener(eventName, (event) => {
+          event.preventDefault();
+          dropZone.classList.add('dragover');
+        });
+      });
+
+      ['dragleave', 'drop'].forEach((eventName) => {
+        dropZone.addEventListener(eventName, (event) => {
+          event.preventDefault();
+          dropZone.classList.remove('dragover');
+        });
+      });
+
+      dropZone.addEventListener('drop', (event) => {
+        const file = event.dataTransfer?.files?.[0];
+        handleFile(file);
+      });
+
+      fileInput.addEventListener('change', () => handleFile(fileInput.files?.[0]));
+
+      function isBBoxInside(inner, outer) {
+        return (
+          inner.x >= outer.x &&
+          inner.y >= outer.y &&
+          inner.x + inner.width <= outer.x + outer.width &&
+          inner.y + inner.height <= outer.y + outer.height
+        );
+      }
+
+      function centerOfBox(box) {
+        return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+      }
+
+      function runDespeckle() {
+        if (!loadedSvg) {
+          setStatus('Load an SVG first.');
+          return;
+        }
+
+        const minArea = Number(minAreaEl.value) || 0;
+        const removeContained = removeContainedEl.checked;
+        const respectCutouts = respectCutoutsEl.checked;
+        const shapes = [...loadedSvg.querySelectorAll(shapeSelector)];
+
+        const items = shapes
+          .map((el) => {
+            try {
+              const box = el.getBBox();
+              return {
+                el,
+                box,
+                area: box.width * box.height,
+                fill: getComputedFill(el),
+                geometry: el instanceof SVGGeometryElement ? el : null
+              };
+            } catch {
+              return null;
+            }
+          })
+          .filter(Boolean);
+
+        const toRemove = new Set();
+
+        for (const item of items) {
+          if (item.area > 0 && item.area <= minArea) {
+            toRemove.add(item.el);
+          }
+        }
+
+        if (removeContained) {
+          for (let i = 0; i < items.length; i++) {
+            const inner = items[i];
+            if (toRemove.has(inner.el) || inner.area === 0) continue;
+
+            for (let j = 0; j < items.length; j++) {
+              if (i === j) continue;
+              const outer = items[j];
+              if (outer.area <= inner.area) continue;
+
+              if (!isBBoxInside(inner.box, outer.box)) continue;
+
+              const p = centerOfBox(inner.box);
+              const containsCenter = outer.geometry?.isPointInFill?.(new DOMPoint(p.x, p.y));
+              if (!containsCenter) continue;
+
+              if (respectCutouts && inner.fill !== outer.fill) {
+                continue;
+              }
+
+              toRemove.add(inner.el);
+              break;
+            }
+          }
+        }
+
+        toRemove.forEach((el) => el.remove());
+
+        setStatus(`Despeckle done. Removed ${toRemove.size} shape(s). Remaining: ${loadedSvg.querySelectorAll(shapeSelector).length}.`);
+      }
+
+      function mergeBackground() {
+        if (!loadedSvg) {
+          setStatus('Load an SVG first.');
+          return;
+        }
+
+        const target = normalizeColor(bgMergeColorEl.value);
+        const shapes = [...loadedSvg.querySelectorAll(shapeSelector)];
+        const matches = shapes.filter((el) => getComputedFill(el) === target);
+
+        if (matches.length <= 1) {
+          setStatus(matches.length === 1 ? 'Only one background shape found. Moved it to back.' : 'No shapes found with selected background color.');
+          if (matches.length === 1) loadedSvg.prepend(matches[0]);
+          return;
+        }
+
+        const pathLikes = matches.filter((el) => el.tagName.toLowerCase() === 'path' && el.getAttribute('d'));
+        const notPaths = matches.filter((el) => !pathLikes.includes(el));
+
+        if (pathLikes.length > 1) {
+          const merged = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+          merged.setAttribute('d', pathLikes.map((p) => p.getAttribute('d')).join(' '));
+          merged.setAttribute('fill', bgMergeColorEl.value);
+          loadedSvg.prepend(merged);
+          pathLikes.forEach((el) => el.remove());
+        }
+
+        notPaths.forEach((el) => loadedSvg.prepend(el));
+
+        setStatus(`Merged ${pathLikes.length} path(s) with ${bgMergeColorEl.value} and moved ${matches.length} matching shape(s) to back.`);
+      }
+
+      zoomInBtn.addEventListener('click', () => {
+        zoom = clampZoom(zoom * 1.2);
+        applyZoom();
+      });
+
+      zoomOutBtn.addEventListener('click', () => {
+        zoom = clampZoom(zoom / 1.2);
+        applyZoom();
+      });
+
+      zoomResetBtn.addEventListener('click', () => {
+        zoom = 1;
+        applyZoom();
+      });
+
+      despeckleBtn.addEventListener('click', runDespeckle);
+      mergeBgBtn.addEventListener('click', mergeBackground);
+      applyZoom();
+    </script>
+  </body>
+</html>
