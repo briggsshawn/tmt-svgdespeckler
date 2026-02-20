@@ -245,18 +245,23 @@
 
         svgStage.innerHTML = '';
         svgStage.appendChild(loadedSvg);
+        ensurePreviewSize(loadedSvg, { connected: true });
 
         const shapeCount = loadedSvg.querySelectorAll(shapeSelector).length;
         setStatus(`Loaded ${filename}. Found ${shapeCount} drawable shapes.`);
       }
 
-      function ensurePreviewSize(svg) {
+      function ensurePreviewSize(svg, options = {}) {
+        const connected = Boolean(options.connected);
         const width = (svg.getAttribute('width') || '').trim();
         const height = (svg.getAttribute('height') || '').trim();
         const widthIsPercent = width.endsWith('%');
         const heightIsPercent = height.endsWith('%');
+        const needsResolvedSize = !width || widthIsPercent || !height || heightIsPercent;
 
-        if (!width || widthIsPercent || !height || heightIsPercent) {
+        svg.style.display = 'block';
+
+        if (needsResolvedSize) {
           const viewBox = (svg.getAttribute('viewBox') || '').trim().split(/\s+/).map(Number);
           if (viewBox.length === 4 && Number.isFinite(viewBox[2]) && Number.isFinite(viewBox[3])) {
             svg.setAttribute('width', String(viewBox[2]));
@@ -264,16 +269,22 @@
             return;
           }
 
-          try {
-            const box = svg.getBBox();
-            if (box.width > 0 && box.height > 0) {
-              svg.setAttribute('viewBox', `${box.x} ${box.y} ${box.width} ${box.height}`);
-              svg.setAttribute('width', String(box.width));
-              svg.setAttribute('height', String(box.height));
+          if (connected) {
+            try {
+              const box = svg.getBBox();
+              if (box.width > 0 && box.height > 0) {
+                svg.setAttribute('viewBox', `${box.x} ${box.y} ${box.width} ${box.height}`);
+                svg.setAttribute('width', String(box.width));
+                svg.setAttribute('height', String(box.height));
+                return;
+              }
+            } catch {
+              // Keep original dimensions if browser cannot measure yet.
             }
-          } catch {
-            // Keep original dimensions if browser cannot measure yet.
           }
+
+          svg.setAttribute('width', '1024');
+          svg.setAttribute('height', '1024');
         }
       }
 
