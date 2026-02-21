@@ -503,7 +503,14 @@
 
               if (!isBBoxInside(inner.box, outer.box)) continue;
 
-              const container = findContainingItem(inner, [outer], { respectCutouts, allowFillMismatch: false });
+              let container = findContainingItem(inner, [outer], { respectCutouts, allowFillMismatch: false });
+
+              // Keep cutouts by default, but still treat tiny mismatched-color
+              // islands as speckles when a minimum area threshold is set.
+              if (!container && inner.area > 0 && inner.area <= minArea) {
+                container = findContainingItem(inner, [outer], { respectCutouts, allowFillMismatch: true });
+              }
+
               if (!container) continue;
 
               const wasMerged =
