@@ -417,50 +417,47 @@ function unionSameColorPathsForExport(originalSvg) {
   const canvas = document.createElement('canvas');
   scope.setup(canvas);
 
-  // Import only children, not the SVG root wrapper
+  // Import the SVG into Paper
   const imported = scope.project.importSVG(originalSvg, { expandShapes: true });
 
-  // Flatten groups
-  imported.flatten();
+  // Collect paths + compound paths (Paper often imports as CompoundPath)
+  const allPaths = [];
+  imported.getItems({ class: scope.Path }).forEach(p => allPaths.push(p));
+  imported.getItems({ class: scope.CompoundPath }).forEach(cp => allPaths.push(cp));
 
-  // Convert CompoundPaths to normal Paths
-  scope.project.getItems({ class: scope.CompoundPath }).forEach(cp => {
-    cp.children.forEach(child => {
-      child.fillColor = cp.fillColor;
-      scope.project.activeLayer.addChild(child);
-    });
-    cp.remove();
-  });
+  // Normalize: ensure every item has a direct fillColor (some inherit / are null)
+  const filled = allPaths.filter(it => it.fillColor && it.visible && !it.guide);
 
-  const paths = scope.project.getItems({ class: scope.Path })
-    .filter(p => p.fillColor && p.visible && !p.guide);
-
-  // Group by fill
+  // Group by fill color string
   const groups = new Map();
-  paths.forEach(p => {
-    const fill = p.fillColor.toCSS(true);
+  filled.forEach(it => {
+    const fill = it.fillColor.toCSS(true);
     if (!groups.has(fill)) groups.set(fill, []);
-    groups.get(fill).push(p);
+    groups.get(fill).push(it);
   });
 
-  // Boolean unite
+  // Boolean unite per color
+  const unitedResults = [];
   groups.forEach(group => {
-    if (group.length < 2) return;
+    if (group.length === 0) return;
 
     let united = group[0];
     for (let i = 1; i < group.length; i++) {
       united = united.unite(group[i]);
     }
 
-    group.forEach(p => {
-      if (p !== united) p.remove();
+    // remove inputs (unite() returns a new item; old ones can remain)
+    group.forEach(it => {
+      if (it !== united && it.isInserted()) it.remove();
     });
+
+    unitedResults.push(united);
   });
 
-  // Build fresh SVG root
+  // Build a clean SVG root and preserve viewport
   const newSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  newSvg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
 
-  // Preserve viewport
   const viewBox = originalSvg.getAttribute('viewBox');
   if (viewBox) newSvg.setAttribute('viewBox', viewBox);
 
@@ -469,13 +466,13 @@ function unionSameColorPathsForExport(originalSvg) {
   if (width) newSvg.setAttribute('width', width);
   if (height) newSvg.setAttribute('height', height);
 
-  // Export each path individually and append
-  scope.project.getItems({ class: scope.Path })
-    .filter(p => p.fillColor && p.visible && !p.guide)
-    .forEach(p => {
-      const exported = p.exportSVG({ asString: false });
-      newSvg.appendChild(exported);
-    });
+  // Export ONLY the united results
+  unitedResults.forEach(it => {
+    // Skip anything that ended up empty
+    if (!it || !it.fillColor) return;
+    const node = it.exportSVG({ asString: false });
+    newSvg.appendChild(node);
+  });
 
   scope.project.clear();
   scope.remove();
