@@ -42,6 +42,35 @@ input[type="file"] {
   border-radius: 0.45rem;
 }
 
+.compact-row > *:first-child { flex: 1.2; }
+
+.color-palette {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.4rem;
+}
+
+.color-swatch {
+  width: 24px;
+  height: 24px;
+  border-radius: 0.3rem;
+  border: 2px solid #555;
+  padding: 0;
+}
+
+.color-swatch.active,
+.all-colors-btn.active {
+  outline: 2px solid var(--accent);
+  border-color: #fff;
+}
+
+.all-colors-btn {
+  background: linear-gradient(90deg, #ff3d3d, #ffc83d, #67ff70, #4dbbff, #a56bff, #ff62c3);
+  color: #111;
+  font-weight: 600;
+}
+
 .row {
   display: flex;
   gap: 0.5rem;
@@ -82,6 +111,10 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   overflow: auto;
   min-height: 60vh;
   position: relative;
+}
+
+#canvasWrap.hot-pink-preview {
+  background: #ff1493;
 }
 
 #canvasWrap.space-pan {
