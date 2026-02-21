@@ -376,7 +376,7 @@
         return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
       }
 
-      function findContainingItem(inner, items, { respectCutouts, allowFillMismatch = false } = {}) {
+      function findContainingItem(inner, items, { respectCutouts, allowFillMismatch = false, minArea = 0 } = {}) {
         if (!inner.el.isConnected) return null;
 
         const candidates = [];
@@ -402,7 +402,12 @@
 
           if (!containsAnySample) continue;
 
-          if (!allowFillMismatch && respectCutouts && inner.fill !== outer.fill) {
+          if (
+            !allowFillMismatch &&
+            respectCutouts &&
+            inner.fill !== outer.fill &&
+            inner.area > minArea
+          ) {
             continue;
           }
 
@@ -470,12 +475,12 @@
 
         for (const item of items) {
           if (item.area > 0 && item.area <= minArea) {
-            let container = findContainingItem(item, items, { respectCutouts, allowFillMismatch: false });
+            let container = findContainingItem(item, items, { respectCutouts, allowFillMismatch: false, minArea });
 
             // Fallback: tiny mismatched-color islands are usually print speckles,
             // so merge them into the nearest enclosing path instead of only deleting.
             if (!container) {
-              container = findContainingItem(item, items, { respectCutouts, allowFillMismatch: true });
+              container = findContainingItem(item, items, { respectCutouts, allowFillMismatch: true, minArea });
             }
 
             const wasMerged =
@@ -503,12 +508,12 @@
 
               if (!isBBoxInside(inner.box, outer.box)) continue;
 
-              let container = findContainingItem(inner, [outer], { respectCutouts, allowFillMismatch: false });
+              let container = findContainingItem(inner, [outer], { respectCutouts, allowFillMismatch: false, minArea });
 
               // Keep cutouts by default, but still treat tiny mismatched-color
               // islands as speckles when a minimum area threshold is set.
               if (!container && inner.area > 0 && inner.area <= minArea) {
-                container = findContainingItem(inner, [outer], { respectCutouts, allowFillMismatch: true });
+                container = findContainingItem(inner, [outer], { respectCutouts, allowFillMismatch: true, minArea });
               }
 
               if (!container) continue;
