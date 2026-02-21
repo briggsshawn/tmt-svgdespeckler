@@ -387,10 +387,20 @@
           if (outer.area <= inner.area) continue;
           if (!isBBoxInside(inner.box, outer.box)) continue;
 
-          const p = centerOfBox(inner.box);
-          const localPoint = toLocalPoint(outer.el, p.x, p.y);
-          const containsCenter = outer.geometry?.isPointInFill?.(new DOMPoint(localPoint.x, localPoint.y));
-          if (!containsCenter) continue;
+          const samplePoints = [
+            centerOfBox(inner.box),
+            { x: inner.box.x + inner.box.width * 0.25, y: inner.box.y + inner.box.height * 0.25 },
+            { x: inner.box.x + inner.box.width * 0.75, y: inner.box.y + inner.box.height * 0.25 },
+            { x: inner.box.x + inner.box.width * 0.25, y: inner.box.y + inner.box.height * 0.75 },
+            { x: inner.box.x + inner.box.width * 0.75, y: inner.box.y + inner.box.height * 0.75 }
+          ];
+
+          const containsAnySample = samplePoints.some((point) => {
+            const localPoint = toLocalPoint(outer.el, point.x, point.y);
+            return outer.geometry?.isPointInFill?.(new DOMPoint(localPoint.x, localPoint.y));
+          });
+
+          if (!containsAnySample) continue;
 
           if (!allowFillMismatch && respectCutouts && inner.fill !== outer.fill) {
             continue;
@@ -460,7 +470,14 @@
 
         for (const item of items) {
           if (item.area > 0 && item.area <= minArea) {
-            const container = findContainingItem(item, items, { respectCutouts, allowFillMismatch: false });
+            let container = findContainingItem(item, items, { respectCutouts, allowFillMismatch: false });
+
+            // Fallback: tiny mismatched-color islands are usually print speckles,
+            // so merge them into the nearest enclosing path instead of only deleting.
+            if (!container) {
+              container = findContainingItem(item, items, { respectCutouts, allowFillMismatch: true });
+            }
+
             const wasMerged =
               item.el.tagName.toLowerCase() === 'path' &&
               container?.el?.tagName?.toLowerCase() === 'path' &&
