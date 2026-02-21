@@ -412,25 +412,18 @@ function removeBackgroundColor() {
   setStatus(`Removed ${removed} shape(s) using edge color ${rgbToHex(dominantFill)}.`);
 }
 
-function unionSameColorPathsForExport(svgEl) {
+function unionSameColorPathsForExport(originalSvg) {
   const scope = new paper.PaperScope();
   const canvas = document.createElement('canvas');
   scope.setup(canvas);
 
-  const imported = scope.project.importSVG(svgEl, { expandShapes: true });
+  // Import only children, not the SVG root wrapper
+  const imported = scope.project.importSVG(originalSvg, { expandShapes: true });
 
-  // Flatten path geometry when supported (Groups don't implement flatten).
-  if (typeof imported.flatten === 'function') {
-    imported.flatten();
-  }
+  // Flatten groups
+  imported.flatten();
 
-  scope.project.getItems({ class: scope.Path }).forEach((path) => {
-    if (typeof path.flatten === 'function') {
-      path.flatten();
-    }
-  });
-
-  // Convert compound paths into regular paths
+  // Convert CompoundPaths to normal Paths
   scope.project.getItems({ class: scope.CompoundPath }).forEach(cp => {
     cp.children.forEach(child => {
       child.fillColor = cp.fillColor;
@@ -439,19 +432,19 @@ function unionSameColorPathsForExport(svgEl) {
     cp.remove();
   });
 
-  const paths = scope.project.getItems({
-    class: scope.Path
-  }).filter(p => p.fillColor && !p.guide && p.visible);
+  const paths = scope.project.getItems({ class: scope.Path })
+    .filter(p => p.fillColor && p.visible && !p.guide);
 
-  const groupsByFill = new Map();
-
-  paths.forEach(path => {
-    const fill = path.fillColor.toCSS(true);
-    if (!groupsByFill.has(fill)) groupsByFill.set(fill, []);
-    groupsByFill.get(fill).push(path);
+  // Group by fill
+  const groups = new Map();
+  paths.forEach(p => {
+    const fill = p.fillColor.toCSS(true);
+    if (!groups.has(fill)) groups.set(fill, []);
+    groups.get(fill).push(p);
   });
 
-  groupsByFill.forEach(group => {
+  // Boolean unite
+  groups.forEach(group => {
     if (group.length < 2) return;
 
     let united = group[0];
@@ -464,25 +457,32 @@ function unionSameColorPathsForExport(svgEl) {
     });
   });
 
-  // Remove giant background rectangle if it spans entire artboard
-  const bounds = scope.project.activeLayer.bounds;
+  // Build fresh SVG root
+  const newSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
 
-  scope.project.getItems({ class: scope.Path }).forEach(p => {
-    if (
-      p.bounds.width >= bounds.width * 0.99 &&
-      p.bounds.height >= bounds.height * 0.99
-    ) {
-      p.remove();
-    }
-  });
+  // Preserve viewport
+  const viewBox = originalSvg.getAttribute('viewBox');
+  if (viewBox) newSvg.setAttribute('viewBox', viewBox);
 
-  const exported = scope.project.exportSVG({ asString: false });
+  const width = originalSvg.getAttribute('width');
+  const height = originalSvg.getAttribute('height');
+  if (width) newSvg.setAttribute('width', width);
+  if (height) newSvg.setAttribute('height', height);
+
+  // Export each path individually and append
+  scope.project.getItems({ class: scope.Path })
+    .filter(p => p.fillColor && p.visible && !p.guide)
+    .forEach(p => {
+      const exported = p.exportSVG({ asString: false });
+      newSvg.appendChild(exported);
+    });
 
   scope.project.clear();
   scope.remove();
 
-  return exported;
+  return newSvg;
 }
+
 function downloadUpdatedSvg() {
   if (!loadedSvg) return setStatus('Load an SVG first.');
   const exportSvg = unionSameColorPathsForExport(loadedSvg.cloneNode(true));
