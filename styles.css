@@ -1,0 +1,117 @@
+:root {
+  color-scheme: dark;
+  --panel: #1e1e1e;
+  --bg: #111;
+  --drop: #222;
+  --accent: #4da3ff;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  background: var(--bg);
+  color: #f3f3f3;
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  min-height: 100vh;
+}
+
+.sidebar {
+  background: var(--panel);
+  padding: 1rem;
+  border-right: 1px solid #333;
+  overflow-y: auto;
+}
+
+h1 { font-size: 1.1rem; margin-top: 0; }
+.hint { color: #aaa; font-size: 0.85rem; }
+.group { margin-bottom: 1rem; }
+label { display: block; font-size: 0.85rem; margin-bottom: 0.35rem; }
+
+input[type="number"],
+input[type="color"],
+button,
+input[type="file"] {
+  width: 100%;
+  padding: 0.6rem;
+  border: 1px solid #444;
+  background: #151515;
+  color: #fff;
+  border-radius: 0.45rem;
+}
+
+.row {
+  display: flex;
+  gap: 0.5rem;
+}
+.row > * { flex: 1; }
+
+button { cursor: pointer; background: #2a2a2a; }
+button:hover { border-color: #666; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.viewer {
+  position: relative;
+  overflow: hidden;
+  display: grid;
+}
+
+#dropZone {
+  margin: 1rem;
+  border: 2px dashed #4b4b4b;
+  border-radius: 0.75rem;
+  background: var(--drop);
+  display: grid;
+  place-items: center;
+  min-height: 200px;
+  color: #b8b8b8;
+}
+
+#dropZone.dragover {
+  border-color: var(--accent);
+  color: #fff;
+}
+
+#canvasWrap {
+  margin: 0 1rem 1rem;
+  border: 1px solid #333;
+  background: #080808;
+  border-radius: 0.75rem;
+  overflow: auto;
+  min-height: 60vh;
+  position: relative;
+}
+
+#canvasWrap.space-pan {
+  cursor: grab;
+}
+
+#canvasWrap.space-pan.panning {
+  cursor: grabbing;
+}
+
+#svgStage {
+  transform-origin: top left;
+  display: inline-block;
+  padding: 1rem;
+}
+
+#svgStage svg { max-width: none; display: block; width: 100%; max-width: 1200px; height: auto; }
+
+#brushPreview {
+  position: absolute;
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 50%;
+  pointer-events: none;
+  display: none;
+  transform: translate(-50%, -50%);
+}
+
+.status {
+  font-size: 0.8rem;
+  color: #9f9f9f;
+  margin-top: 0.4rem;
+}
