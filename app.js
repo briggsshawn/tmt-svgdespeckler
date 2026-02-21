@@ -241,13 +241,8 @@ function loadSvgText(text, filename = 'SVG') {
 }
 
 function autoUniteSpeckles() {
-  if (!loadedSvg) return 0;
-  const minArea = Number(speckleAreaEl.value) || 0;
-  const items = getShapeItems();
-  const mergedCount = removeContainedShapesByColor(items, minArea);
-
-  if (mergedCount > 0) rebuildColorPalettes();
-  return mergedCount;
+  // No auto containment merging needed.
+  return 0;
 }
 
 function downloadUpdatedSvg() {
@@ -317,37 +312,6 @@ function circleIntersectsBox(center, radius, box) {
   const dx = center.x - nearestX;
   const dy = center.y - nearestY;
   return dx * dx + dy * dy <= radius * radius;
-}
-
-function centerOfBox(box) {
-  return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
-}
-
-function findContainerOfColor(items, innerItem, targetColor) {
-  const point = centerOfBox(innerItem.box);
-  const candidates = items.filter((outer) => {
-    if (outer.el === innerItem.el || !outer.el.isConnected) return false;
-    if (outer.area <= innerItem.area) return false;
-    if (outer.fill !== targetColor) return false;
-    const local = toLocalPoint(outer.el, point.x, point.y);
-    return outer.geometry?.isPointInFill?.(new DOMPoint(local.x, local.y));
-  });
-
-  candidates.sort((a, b) => a.area - b.area);
-  return candidates[0] || null;
-}
-
-function removeContainedShapesByColor(items, maxArea) {
-  let removed = 0;
-  for (const item of items) {
-    if (!item.el.isConnected || item.area <= 0 || item.area > maxArea || !item.fill) continue;
-    const container = findContainerOfColor(items, item, item.fill);
-    if (!container) continue;
-
-    item.el.remove();
-    removed += 1;
-  }
-  return removed;
 }
 
 function getEdgeTouchingItems(items, targetFill = null) {
@@ -499,8 +463,6 @@ function performBrushPass(clientX, clientY) {
   const minArea = Number(speckleAreaEl.value) || 0;
   const brushRadius = Number(brushSizeEl.value) || 1;
   const sourceColor = selectedSpeckleColor;
-  const targetColor = selectedMergeColor;
-  if (!targetColor) return;
 
   const pointer = screenToSvgPoint(clientX, clientY);
   const items = getShapeItems();
@@ -511,24 +473,17 @@ function performBrushPass(clientX, clientY) {
     return speckleColorMode === 'all' ? Boolean(item.fill) : item.fill === sourceColor;
   });
 
-  let changed = 0;
-  const mergedHex = rgbToHex(targetColor);
+  let removed = 0;
+
   for (const item of touched) {
-    item.el.setAttribute('fill', mergedHex);
-    if (item.el.dataset.renderOriginalFill !== undefined) {
-      item.el.dataset.renderOriginalFill = mergedHex;
-    }
-    changed += 1;
+    if (!item.el.isConnected) continue;
+    item.el.remove();   // HARD DELETE
+    removed += 1;
   }
 
-  if (changed > 0) {
-    const updatedItems = getShapeItems();
-    changed += removeContainedShapesByColor(updatedItems, minArea);
-  }
-
-  if (changed > 0) {
+  if (removed > 0) {
     rebuildColorPalettes();
-    setStatus(`Magic eraser updated ${changed} speckle(s).`);
+    setStatus(`Removed ${removed} speckle(s).`);
   }
 }
 
