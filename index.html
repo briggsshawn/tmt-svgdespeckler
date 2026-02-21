@@ -342,6 +342,40 @@
         return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
       }
 
+      function toGlobalPoint(el, x, y) {
+        const matrix = el.getCTM();
+        if (!matrix) return { x, y };
+        const point = new DOMPoint(x, y).matrixTransform(matrix);
+        return { x: point.x, y: point.y };
+      }
+
+      function toLocalPoint(el, x, y) {
+        const matrix = el.getCTM();
+        if (!matrix) return { x, y };
+        const inverse = matrix.inverse();
+        const point = new DOMPoint(x, y).matrixTransform(inverse);
+        return { x: point.x, y: point.y };
+      }
+
+      function getGlobalBBox(el) {
+        const box = el.getBBox();
+        const corners = [
+          toGlobalPoint(el, box.x, box.y),
+          toGlobalPoint(el, box.x + box.width, box.y),
+          toGlobalPoint(el, box.x, box.y + box.height),
+          toGlobalPoint(el, box.x + box.width, box.y + box.height)
+        ];
+
+        const xs = corners.map((p) => p.x);
+        const ys = corners.map((p) => p.y);
+        const minX = Math.min(...xs);
+        const maxX = Math.max(...xs);
+        const minY = Math.min(...ys);
+        const maxY = Math.max(...ys);
+
+        return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+      }
+
       function findContainingItem(inner, items, { respectCutouts, allowFillMismatch = false } = {}) {
         if (!inner.el.isConnected) return null;
 
@@ -352,7 +386,8 @@
           if (!isBBoxInside(inner.box, outer.box)) continue;
 
           const p = centerOfBox(inner.box);
-          const containsCenter = outer.geometry?.isPointInFill?.(new DOMPoint(p.x, p.y));
+          const localPoint = toLocalPoint(outer.el, p.x, p.y);
+          const containsCenter = outer.geometry?.isPointInFill?.(new DOMPoint(localPoint.x, localPoint.y));
           if (!containsCenter) continue;
 
           if (!allowFillMismatch && respectCutouts && inner.fill !== outer.fill) {
@@ -389,7 +424,7 @@
         const items = shapes
           .map((el) => {
             try {
-              const box = el.getBBox();
+              const box = getGlobalBBox(el);
               return {
                 el,
                 box,
