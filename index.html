@@ -125,7 +125,7 @@
 
       <div class="group">
         <label for="minArea">Remove paths smaller than area (px²)</label>
-        <input id="minArea" type="number" min="0" value="18" step="1" />
+        <input id="minArea" type="number" min="0" value="70" step="1" />
       </div>
 
       <div class="group">
@@ -135,6 +135,10 @@
 
       <div class="group">
         <button class="primary" id="despeckleBtn">Run despeckle</button>
+      </div>
+
+      <div class="group">
+        <button id="downloadBtn" disabled>Download updated SVG</button>
       </div>
 
       <div class="group">
@@ -173,12 +177,14 @@
       const bgMergeColorEl = document.getElementById('bgMergeColor');
       const despeckleBtn = document.getElementById('despeckleBtn');
       const mergeBgBtn = document.getElementById('mergeBgBtn');
+      const downloadBtn = document.getElementById('downloadBtn');
       const zoomInBtn = document.getElementById('zoomIn');
       const zoomOutBtn = document.getElementById('zoomOut');
       const zoomResetBtn = document.getElementById('zoomReset');
 
       let zoom = 1;
       let loadedSvg = null;
+      let loadedFilename = 'updated.svg';
 
       const shapeSelector = 'path,rect,circle,ellipse,polygon,polyline';
 
@@ -239,6 +245,7 @@
         }
 
         loadedSvg = document.importNode(svg, true);
+        loadedFilename = filename.toLowerCase().endsWith('.svg') ? filename : `${filename}.svg`;
         loadedSvg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
         ensurePreviewSize(loadedSvg);
 
@@ -247,7 +254,31 @@
         ensurePreviewSize(loadedSvg);
 
         const shapeCount = loadedSvg.querySelectorAll(shapeSelector).length;
+        downloadBtn.disabled = false;
         setStatus(`Loaded ${filename}. Found ${shapeCount} drawable shapes.`);
+      }
+
+      function downloadUpdatedSvg() {
+        if (!loadedSvg) {
+          setStatus('Load an SVG first.');
+          return;
+        }
+
+        const serializer = new XMLSerializer();
+        const markup = serializer.serializeToString(loadedSvg);
+        const blob = new Blob([markup], { type: 'image/svg+xml;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        const outputName = loadedFilename.replace(/\.svg$/i, '') + '-updated.svg';
+
+        a.href = url;
+        a.download = outputName;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+
+        URL.revokeObjectURL(url);
+        setStatus(`Downloaded ${outputName}.`);
       }
 
       function ensurePreviewSize(svg) {
@@ -427,6 +458,7 @@
 
       despeckleBtn.addEventListener('click', runDespeckle);
       mergeBgBtn.addEventListener('click', mergeBackground);
+      downloadBtn.addEventListener('click', downloadUpdatedSvg);
       applyZoom();
     </script>
   </body>
