@@ -413,88 +413,249 @@ function removeBackgroundColor() {
 }
 
 function unionSameColorPathsForExport(originalSvg) {
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const exportSvg = originalSvg.cloneNode(true);
+
+  // ---- 1) Restore true fills/strokes if user is in "Thin Stroke" preview mode ----
+  // Your preview mode stores originals in dataset.* then overwrites attributes.
+  // We always export using the ORIGINAL fills/strokes, regardless of current view mode.
+  const shapeSelector = 'path,rect,circle,ellipse,polygon,polyline,line';
+
+  [...exportSvg.querySelectorAll(shapeSelector)].forEach((el) => {
+    const of = el.dataset?.renderOriginalFill;
+    const os = el.dataset?.renderOriginalStroke;
+    const osw = el.dataset?.renderOriginalStrokeWidth;
+
+    if (of !== undefined) {
+      if (of) el.setAttribute('fill', of);
+      else el.removeAttribute('fill');
+      delete el.dataset.renderOriginalFill;
+    }
+    if (os !== undefined) {
+      if (os) el.setAttribute('stroke', os);
+      else el.removeAttribute('stroke');
+      delete el.dataset.renderOriginalStroke;
+    }
+    if (osw !== undefined) {
+      if (osw) el.setAttribute('stroke-width', osw);
+      else el.removeAttribute('stroke-width');
+      delete el.dataset.renderOriginalStrokeWidth;
+    }
+    el.removeAttribute('vector-effect');
+  });
+
+  // ---- 2) Inline computed fill/stroke so Paper sees it (handles CSS/class fills) ----
+  // Note: Paper import can miss computed styles. We bake them in.
+  function normalizeColor(color) {
+    if (!color) return null;
+    const t = String(color).trim().toLowerCase();
+    if (t === 'none' || t === 'transparent') return null;
+    return t.replace(/\s+/g, '');
+  }
+
+  [...exportSvg.querySelectorAll(shapeSelector)].forEach((el) => {
+    const cs = el.ownerSVGElement ? getComputedStyle(el) : null;
+    if (!cs) return;
+
+    const fillAttr = normalizeColor(el.getAttribute('fill'));
+    const strokeAttr = normalizeColor(el.getAttribute('stroke'));
+
+    // If fill missing but computed fill exists, set it.
+    if (!fillAttr) {
+      const cf = normalizeColor(cs.fill);
+      if (cf) el.setAttribute('fill', cf);
+    }
+    // If stroke missing but computed stroke exists, set it.
+    if (!strokeAttr) {
+      const csStroke = normalizeColor(cs.stroke);
+      if (csStroke) el.setAttribute('stroke', csStroke);
+    }
+  });
+
+  // ---- 3) Separate filled vs stroke-only elements (we only union filled geometry) ----
+  const allEls = [...exportSvg.querySelectorAll(shapeSelector)];
+  const filledEls = [];
+  const strokeOnlyClones = [];
+
+  allEls.forEach((el) => {
+    const fill = normalizeColor(el.getAttribute('fill'));
+    const stroke = normalizeColor(el.getAttribute('stroke'));
+    const hasFill = !!fill;
+    const hasStroke = !!stroke;
+
+    if (hasFill) {
+      filledEls.push(el);
+    } else if (hasStroke) {
+      // Preserve strokes exactly (Paper union can distort stroke-only linework)
+      strokeOnlyClones.push(el.cloneNode(true));
+    }
+  });
+
+  // If nothing has fill, bail gracefully (still preserve viewport + strokes)
+  const outSvg = document.createElementNS(SVG_NS, 'svg');
+  outSvg.setAttribute('xmlns', SVG_NS);
+
+  const viewBox = originalSvg.getAttribute('viewBox');
+  if (viewBox) outSvg.setAttribute('viewBox', viewBox);
+  const width = originalSvg.getAttribute('width');
+  const height = originalSvg.getAttribute('height');
+  if (width) outSvg.setAttribute('width', width);
+  if (height) outSvg.setAttribute('height', height);
+
+  if (filledEls.length === 0) {
+    strokeOnlyClones.forEach((n) => outSvg.appendChild(n));
+    return outSvg;
+  }
+
+  // ---- 4) Build a "fills-only" SVG for Paper to import ----
+  const fillsOnlySvg = document.createElementNS(SVG_NS, 'svg');
+  fillsOnlySvg.setAttribute('xmlns', SVG_NS);
+  if (viewBox) fillsOnlySvg.setAttribute('viewBox', viewBox);
+  if (width) fillsOnlySvg.setAttribute('width', width);
+  if (height) fillsOnlySvg.setAttribute('height', height);
+  filledEls.forEach((el) => fillsOnlySvg.appendChild(el.cloneNode(true)));
+
+  // ---- 5) Paper union per fill color (exclude background-like shapes) ----
   const scope = new paper.PaperScope();
   const canvas = document.createElement('canvas');
   scope.setup(canvas);
+  scope.view.autoUpdate = false;
 
-  // Import the SVG into Paper
-  const imported = scope.project.importSVG(originalSvg, { expandShapes: true });
+  const imported = scope.project.importSVG(fillsOnlySvg, { expandShapes: true });
 
-  // Collect paths + compound paths (Paper often imports as CompoundPath)
-  const allPaths = [];
-  imported.getItems({ class: scope.Path }).forEach(p => allPaths.push(p));
-  imported.getItems({ class: scope.CompoundPath }).forEach(cp => allPaths.push(cp));
+  const items = [
+    ...imported.getItems({ class: scope.Path }),
+    ...imported.getItems({ class: scope.CompoundPath })
+  ].filter((it) => it.visible && !it.guide && it.fillColor);
 
-  // Normalize: ensure every item has a direct fillColor (some inherit / are null)
-  const filled = allPaths.filter(it => it.fillColor && it.visible && !it.guide);
+  const bounds = imported.bounds;
+  const EDGE_EPS = 1.5;
+  const BACKGROUND_AREA_RATIO = 0.55; // consider "background" if it covers >55% of bbox
 
-  // Group by fill color string
-  const groups = new Map();
-  filled.forEach(it => {
-    const fill = it.fillColor.toCSS(true);
-    if (!groups.has(fill)) groups.set(fill, []);
-    groups.get(fill).push(it);
+  function isEdgeTouching(it) {
+    const b = it.bounds;
+    return (
+      b.left <= bounds.left + EDGE_EPS ||
+      b.top <= bounds.top + EDGE_EPS ||
+      b.right >= bounds.right - EDGE_EPS ||
+      b.bottom >= bounds.bottom - EDGE_EPS
+    );
+  }
+
+  function areaApprox(it) {
+    // some items can have weird/0 area; use bounds area
+    const a = (typeof it.area === 'number' && isFinite(it.area)) ? Math.abs(it.area) : 0;
+    if (a > 0) return a;
+    return it.bounds.width * it.bounds.height;
+  }
+
+  // group by fill
+  const byFill = new Map();
+  items.forEach((it) => {
+    const key = it.fillColor.toCSS(true);
+    if (!byFill.has(key)) byFill.set(key, []);
+    byFill.get(key).push(it);
   });
 
-  // Boolean unite per color
-  const unitedResults = [];
-  groups.forEach(group => {
-    if (group.length === 0) return;
-
-    let united = group[0];
-    for (let i = 1; i < group.length; i++) {
-      united = united.unite(group[i]);
+  // balanced union to avoid lockups
+  function balancedUnion(list) {
+    const stack = list.slice();
+    while (stack.length > 1) {
+      const a = stack.pop();
+      const b = stack.pop();
+      const u = a.unite(b);
+      // remove originals (unite returns a new item)
+      if (a.isInserted()) a.remove();
+      if (b.isInserted()) b.remove();
+      stack.push(u);
     }
+    return stack[0] || null;
+  }
 
-    // remove inputs (unite() returns a new item; old ones can remain)
-    group.forEach(it => {
-      if (it !== united && it.isInserted()) it.remove();
+  const unioned = [];
+
+  byFill.forEach((group) => {
+    if (!group || group.length === 0) return;
+
+    // split background-like shapes OUT of union
+    const bg = [];
+    const work = [];
+
+    const totalArea = bounds.width * bounds.height;
+
+    group.forEach((it) => {
+      const big = areaApprox(it) >= totalArea * BACKGROUND_AREA_RATIO;
+      if (big && isEdgeTouching(it)) bg.push(it);
+      else work.push(it);
     });
 
-    unitedResults.push(united);
+    // union working shapes
+    if (work.length === 1) {
+      unioned.push(work[0]);
+    } else if (work.length > 1) {
+      const u = balancedUnion(work);
+      if (u) unioned.push(u);
+    }
+
+    // keep background shapes untouched
+    bg.forEach((it) => unioned.push(it));
   });
 
-  // Build a clean SVG root and preserve viewport
-  const newSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  newSvg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
-
-  const viewBox = originalSvg.getAttribute('viewBox');
-  if (viewBox) newSvg.setAttribute('viewBox', viewBox);
-
-  const width = originalSvg.getAttribute('width');
-  const height = originalSvg.getAttribute('height');
-  if (width) newSvg.setAttribute('width', width);
-  if (height) newSvg.setAttribute('height', height);
-
-  // Export ONLY the united results
-  unitedResults.forEach(it => {
-    // Skip anything that ended up empty
+  // ---- 6) Export unioned fills back into final SVG + re-add stroke-only elements ----
+  unioned.forEach((it) => {
     if (!it || !it.fillColor) return;
     const node = it.exportSVG({ asString: false });
-    newSvg.appendChild(node);
+    outSvg.appendChild(node);
   });
+
+  strokeOnlyClones.forEach((n) => outSvg.appendChild(n));
 
   scope.project.clear();
   scope.remove();
 
-  return newSvg;
+  return outSvg;
 }
 
 function downloadUpdatedSvg() {
-  if (!loadedSvg) return setStatus('Load an SVG first.');
-  const exportSvg = unionSameColorPathsForExport(loadedSvg.cloneNode(true));
-  const markup = new XMLSerializer().serializeToString(exportSvg);
-  const blob = new Blob([markup], { type: 'image/svg+xml;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  const outputName = loadedFilename.replace(/\.svg$/i, '') + '-updated.svg';
-  a.href = url;
-  a.download = outputName;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-  setStatus(`Downloaded ${outputName} with same-color paths unioned.`);
+  if (!loadedSvg) {
+    setStatus('Load an SVG first.');
+    return;
+  }
+
+  try {
+    const resultSvg = unionSameColorPathsForExport(loadedSvg.cloneNode(true));
+
+    if (!resultSvg || !resultSvg.querySelector('*')) {
+      setStatus('Export failed: no geometry returned.');
+      console.error('Export returned empty SVG:', resultSvg);
+      return;
+    }
+
+    const markup = new XMLSerializer().serializeToString(resultSvg);
+
+    if (!markup || markup.length < 50) {
+      setStatus('Export failed: serialized SVG empty.');
+      console.error('Serialized markup:', markup);
+      return;
+    }
+
+    const blob = new Blob([markup], { type: 'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = loadedFilename.replace(/\.svg$/i, '') + '-updated.svg';
+
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+
+    setStatus('Download complete.');
+  } catch (err) {
+    console.error(err);
+    setStatus('Export crashed. See console.');
+  }
 }
 
 function applyRenderMode() {
