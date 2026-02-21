@@ -413,52 +413,35 @@ function removeBackgroundColor() {
 }
 
 function unionSameColorPathsForExport(svgEl) {
-  if (!window.paper) return svgEl;
+  const pathNodes = [...svgEl.querySelectorAll('path[fill]')]
+    .filter((path) => normalizeColor(path.getAttribute('fill')));
 
-  const paperScope = new window.paper.PaperScope();
-  const canvas = document.createElement('canvas');
-  paperScope.setup(canvas);
-  paperScope.settings.applyMatrix = true;
+  const groupsByFill = new Map();
+  pathNodes.forEach((path) => {
+    const fill = normalizeColor(path.getAttribute('fill'));
+    if (!fill) return;
+    if (!groupsByFill.has(fill)) groupsByFill.set(fill, []);
+    groupsByFill.get(fill).push(path);
+  });
 
-  try {
-    paperScope.project.importSVG(svgEl);
-    const pathItems = paperScope.project.getItems({
-      match: (item) => item instanceof paperScope.PathItem && item.closed && Boolean(item.fillColor)
-    });
+  groupsByFill.forEach((group) => {
+    if (group.length < 2) return;
+    const combined = group
+      .map((path) => path.getAttribute('d') || '')
+      .filter(Boolean)
+      .join(' ')
+      .trim();
 
-    const groupsByFill = new Map();
-    pathItems.forEach((item) => {
-      const fillKey = item.fillColor.toCSS(true);
-      if (!groupsByFill.has(fillKey)) groupsByFill.set(fillKey, []);
-      groupsByFill.get(fillKey).push(item);
-    });
+    if (!combined) return;
 
-    groupsByFill.forEach((group) => {
-      if (group.length < 2) return;
+    const keeper = group[0];
+    keeper.setAttribute('d', combined);
+    for (let i = 1; i < group.length; i += 1) {
+      group[i].remove();
+    }
+  });
 
-      let merged = group[0].clone({ insert: false });
-      for (let i = 1; i < group.length; i += 1) {
-        const united = merged.unite(group[i], { insert: false });
-        merged.remove();
-        merged = united;
-      }
-
-      merged.fillColor = group[0].fillColor.clone();
-      merged.strokeColor = null;
-      merged.insertAbove(group[0]);
-      group.forEach((item) => item.remove());
-    });
-
-    const exported = paperScope.project.exportSVG({ asString: false, precision: 3 });
-    exported.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
-    return exported;
-  } catch (error) {
-    console.warn('Path union for export failed; downloading current SVG.', error);
-    return svgEl;
-  } finally {
-    paperScope.project?.clear();
-    paperScope.remove();
-  }
+  return svgEl;
 }
 
 function downloadUpdatedSvg() {
