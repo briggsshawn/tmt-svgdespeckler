@@ -418,47 +418,63 @@ function unionSameColorPathsForExport(svgEl) {
   scope.setup(canvas);
 
   const imported = scope.project.importSVG(svgEl, { expandShapes: true });
-  scope.project.activeLayer.addChild(imported);
+
+  // Flatten everything into individual paths
+  imported.flatten();
+
+  // Convert compound paths into regular paths
+  scope.project.getItems({ class: scope.CompoundPath }).forEach(cp => {
+    cp.children.forEach(child => {
+      child.fillColor = cp.fillColor;
+      scope.project.activeLayer.addChild(child);
+    });
+    cp.remove();
+  });
 
   const paths = scope.project.getItems({
-    class: scope.Path,
-    match: item => item.fillColor
-  });
+    class: scope.Path
+  }).filter(p => p.fillColor && !p.guide && p.visible);
 
   const groupsByFill = new Map();
 
-  paths.forEach((item) => {
-    const fill = item.fillColor.toCSS(true);
+  paths.forEach(path => {
+    const fill = path.fillColor.toCSS(true);
     if (!groupsByFill.has(fill)) groupsByFill.set(fill, []);
-    groupsByFill.get(fill).push(item);
+    groupsByFill.get(fill).push(path);
   });
 
-  groupsByFill.forEach((group) => {
+  groupsByFill.forEach(group => {
     if (group.length < 2) return;
 
     let united = group[0];
-
     for (let i = 1; i < group.length; i++) {
       united = united.unite(group[i]);
     }
 
-    group.forEach((item) => {
-      if (item !== united) item.remove();
+    group.forEach(p => {
+      if (p !== united) p.remove();
     });
   });
 
-  // Export ONLY the children, not project wrapper
-  const layer = scope.project.activeLayer;
-  const tempGroup = new scope.Group(layer.children.slice());
+  // Remove giant background rectangle if it spans entire artboard
+  const bounds = scope.project.activeLayer.bounds;
 
-  const exported = tempGroup.exportSVG({ asString: false });
+  scope.project.getItems({ class: scope.Path }).forEach(p => {
+    if (
+      p.bounds.width >= bounds.width * 0.99 &&
+      p.bounds.height >= bounds.height * 0.99
+    ) {
+      p.remove();
+    }
+  });
+
+  const exported = scope.project.exportSVG({ asString: false });
 
   scope.project.clear();
   scope.remove();
 
   return exported;
 }
-
 function downloadUpdatedSvg() {
   if (!loadedSvg) return setStatus('Load an SVG first.');
   const exportSvg = unionSameColorPathsForExport(loadedSvg.cloneNode(true));
