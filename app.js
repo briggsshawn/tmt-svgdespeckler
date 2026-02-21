@@ -34,7 +34,8 @@ let strokeSnapshotTaken = false;
 let pageDragDepth = 0;
 let renderMode = 'fill';
 
-const shapeSelector = 'path,rect,circle,ellipse,polygon,polyline';
+const shapeSelector = 'path,rect,circle,ellipse,polygon,polyline,line';
+const pathCommandChars = new Set(['M', 'm', 'Z', 'z', 'L', 'l', 'H', 'h', 'V', 'v', 'C', 'c', 'S', 's', 'Q', 'q', 'T', 't', 'A', 'a']);
 
 function setStatus(message) {
   statusEl.textContent = message;
@@ -120,12 +121,173 @@ function restoreFromMarkup(markup) {
   const svg = doc.querySelector('svg');
   if (!svg) return false;
   loadedSvg = document.importNode(svg, true);
+  normalizeSvgGeometry(loadedSvg);
   loadedSvg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
   svgStage.innerHTML = '';
   svgStage.appendChild(loadedSvg);
   applyRenderMode();
   rebuildColorPalettes();
   return true;
+}
+
+function parseNumber(value, fallback = 0) {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function copyShapeAttributesToPath(source, target, dropped = []) {
+  const droppedSet = new Set(dropped);
+  [...source.attributes].forEach((attr) => {
+    if (!droppedSet.has(attr.name)) {
+      target.setAttribute(attr.name, attr.value);
+    }
+  });
+  target.removeAttribute('fill-rule');
+  target.removeAttribute('clip-rule');
+  target.style.fillRule = '';
+  target.style.clipRule = '';
+}
+
+function rectToPathData(rect) {
+  const x = parseNumber(rect.getAttribute('x'));
+  const y = parseNumber(rect.getAttribute('y'));
+  const width = parseNumber(rect.getAttribute('width'));
+  const height = parseNumber(rect.getAttribute('height'));
+  if (width <= 0 || height <= 0) return '';
+
+  const rxRaw = parseNumber(rect.getAttribute('rx'));
+  const ryRaw = parseNumber(rect.getAttribute('ry'));
+  const rx = Math.min(Math.max(rxRaw || ryRaw, 0), width / 2);
+  const ry = Math.min(Math.max(ryRaw || rxRaw, 0), height / 2);
+
+  if (!rx && !ry) {
+    return `M${x} ${y} H${x + width} V${y + height} H${x} Z`;
+  }
+
+  return [
+    `M${x + rx} ${y}`,
+    `H${x + width - rx}`,
+    `A${rx} ${ry} 0 0 1 ${x + width} ${y + ry}`,
+    `V${y + height - ry}`,
+    `A${rx} ${ry} 0 0 1 ${x + width - rx} ${y + height}`,
+    `H${x + rx}`,
+    `A${rx} ${ry} 0 0 1 ${x} ${y + height - ry}`,
+    `V${y + ry}`,
+    `A${rx} ${ry} 0 0 1 ${x + rx} ${y}`,
+    'Z'
+  ].join(' ');
+}
+
+function circleToPathData(circle) {
+  const cx = parseNumber(circle.getAttribute('cx'));
+  const cy = parseNumber(circle.getAttribute('cy'));
+  const r = parseNumber(circle.getAttribute('r'));
+  if (r <= 0) return '';
+  return [`M${cx - r} ${cy}`, `A${r} ${r} 0 1 0 ${cx + r} ${cy}`, `A${r} ${r} 0 1 0 ${cx - r} ${cy}`, 'Z'].join(' ');
+}
+
+function ellipseToPathData(ellipse) {
+  const cx = parseNumber(ellipse.getAttribute('cx'));
+  const cy = parseNumber(ellipse.getAttribute('cy'));
+  const rx = parseNumber(ellipse.getAttribute('rx'));
+  const ry = parseNumber(ellipse.getAttribute('ry'));
+  if (rx <= 0 || ry <= 0) return '';
+  return [`M${cx - rx} ${cy}`, `A${rx} ${ry} 0 1 0 ${cx + rx} ${cy}`, `A${rx} ${ry} 0 1 0 ${cx - rx} ${cy}`, 'Z'].join(' ');
+}
+
+function pointsToPathData(points, closePath) {
+  const tokens = (points || '').trim().split(/[\s,]+/).map((n) => Number.parseFloat(n)).filter(Number.isFinite);
+  if (tokens.length < 4) return '';
+  const segments = [`M${tokens[0]} ${tokens[1]}`];
+  for (let i = 2; i + 1 < tokens.length; i += 2) {
+    segments.push(`L${tokens[i]} ${tokens[i + 1]}`);
+  }
+  if (closePath) segments.push('Z');
+  return segments.join(' ');
+}
+
+function lineToPathData(line) {
+  const x1 = parseNumber(line.getAttribute('x1'));
+  const y1 = parseNumber(line.getAttribute('y1'));
+  const x2 = parseNumber(line.getAttribute('x2'));
+  const y2 = parseNumber(line.getAttribute('y2'));
+  return `M${x1} ${y1} L${x2} ${y2}`;
+}
+
+function toPathData(el) {
+  switch (el.tagName.toLowerCase()) {
+    case 'path': return el.getAttribute('d') || '';
+    case 'rect': return rectToPathData(el);
+    case 'circle': return circleToPathData(el);
+    case 'ellipse': return ellipseToPathData(el);
+    case 'polygon': return pointsToPathData(el.getAttribute('points'), true);
+    case 'polyline': return pointsToPathData(el.getAttribute('points'), false);
+    case 'line': return lineToPathData(el);
+    default: return '';
+  }
+}
+
+function splitPathDataIntoSubpaths(d) {
+  const chunks = [];
+  for (let i = 0; i < d.length; i += 1) {
+    if (!pathCommandChars.has(d[i])) continue;
+    const start = i;
+    let end = d.length;
+    for (let j = i + 1; j < d.length; j += 1) {
+      if (pathCommandChars.has(d[j])) {
+        end = j;
+        break;
+      }
+    }
+    chunks.push(d.slice(start, end).trim());
+    i = end - 1;
+  }
+
+  if (chunks.length === 0) return [];
+  const subpaths = [];
+  let current = [];
+
+  chunks.forEach((chunk) => {
+    if (/^[Mm]/.test(chunk) && current.length > 0) {
+      subpaths.push(current.join(' '));
+      current = [chunk];
+      return;
+    }
+    current.push(chunk);
+  });
+
+  if (current.length > 0) subpaths.push(current.join(' '));
+  return subpaths.map((subpath) => subpath.trim()).filter(Boolean);
+}
+
+function expandElementToSimplePaths(el) {
+  const d = toPathData(el);
+  if (!d) return [];
+  const subpaths = splitPathDataIntoSubpaths(d);
+  if (subpaths.length === 0) return [];
+
+  return subpaths.map((subpath) => {
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    copyShapeAttributesToPath(el, path, ['d', 'x', 'y', 'width', 'height', 'rx', 'ry', 'r', 'cx', 'cy', 'points', 'x1', 'y1', 'x2', 'y2']);
+    path.setAttribute('d', subpath);
+    return path;
+  });
+}
+
+function normalizeSvgGeometry(svg) {
+  const elements = [...svg.querySelectorAll(shapeSelector)];
+  elements.forEach((el) => {
+    if (!el.parentNode || !el.isConnected) return;
+    const paths = expandElementToSimplePaths(el);
+    if (paths.length === 0) {
+      el.remove();
+      return;
+    }
+
+    const frag = document.createDocumentFragment();
+    paths.forEach((path) => frag.appendChild(path));
+    el.replaceWith(frag);
+  });
 }
 
 function undoStep() {
@@ -228,6 +390,7 @@ function loadSvgText(text, filename = 'SVG') {
   }
 
   loadedSvg = document.importNode(svg, true);
+  normalizeSvgGeometry(loadedSvg);
   loadedSvg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
   loadedFilename = filename.toLowerCase().endsWith('.svg') ? filename : `${filename}.svg`;
   svgStage.innerHTML = '';
