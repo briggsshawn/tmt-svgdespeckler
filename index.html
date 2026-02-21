@@ -9,7 +9,7 @@
   <body>
     <aside class="sidebar">
       <h1>SVG Magic Eraser</h1>
-      <p class="hint">Load an SVG, then brush over speckles to merge them into your chosen color.</p>
+      <p class="hint">Drop an SVG, then brush over speckles to merge them into your chosen color.</p>
 
       <div class="group">
         <label for="fileInput">Open SVG file</label>
@@ -22,18 +22,16 @@
       </div>
 
       <div class="group">
-        <label for="speckleColor">Speckle color to remove</label>
-        <div id="specklePalette" class="color-palette"></div>
+        <label>Speckle color to remove</label>
         <div class="row compact-row">
-          <button id="allColorsBtn" type="button" class="all-colors-btn">All colors</button>
-          <input id="speckleColor" type="color" value="#000000" />
+          <button id="allColorsBtn" type="button" class="all-colors-btn" aria-label="All colors"></button>
+          <div id="specklePalette" class="color-palette inline"></div>
         </div>
       </div>
 
       <div class="group">
-        <label for="mergeColor">Merge/unite with color</label>
+        <label>Merge/unite with color</label>
         <div id="mergePalette" class="color-palette"></div>
-        <input id="mergeColor" type="color" value="#ffffff" />
       </div>
 
       <div class="group">
@@ -46,8 +44,9 @@
         <button id="downloadBtn" disabled>Download SVG</button>
       </div>
 
-      <div class="group">
-        <button id="flattenBgBtn">Flatten Background</button>
+      <div class="group row">
+        <button id="flattenBgBtn">Flatten background color</button>
+        <button id="removeBgBtn">Remove background color</button>
       </div>
 
       <div class="group">
@@ -68,12 +67,13 @@
     </aside>
 
     <main class="viewer">
-      <div id="dropZone">Drop SVG file here</div>
       <div id="canvasWrap">
         <div id="svgStage"></div>
         <div id="brushPreview" aria-hidden="true"></div>
       </div>
     </main>
+
+    <div id="dropOverlay" aria-hidden="true">Drop file to import</div>
 
     <script src="app.js"></script>
   </body>

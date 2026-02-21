@@ -1,17 +1,16 @@
-const dropZone = document.getElementById('dropZone');
 const fileInput = document.getElementById('fileInput');
 const svgStage = document.getElementById('svgStage');
 const canvasWrap = document.getElementById('canvasWrap');
 const brushPreview = document.getElementById('brushPreview');
+const dropOverlay = document.getElementById('dropOverlay');
 const statusEl = document.getElementById('status');
 const speckleAreaEl = document.getElementById('speckleArea');
-const speckleColorEl = document.getElementById('speckleColor');
-const mergeColorEl = document.getElementById('mergeColor');
 const specklePaletteEl = document.getElementById('specklePalette');
 const mergePaletteEl = document.getElementById('mergePalette');
 const allColorsBtn = document.getElementById('allColorsBtn');
 const brushSizeEl = document.getElementById('brushSize');
 const flattenBgBtn = document.getElementById('flattenBgBtn');
+const removeBgBtn = document.getElementById('removeBgBtn');
 const togglePinkBgBtn = document.getElementById('togglePinkBgBtn');
 const undoBtn = document.getElementById('undoBtn');
 const downloadBtn = document.getElementById('downloadBtn');
@@ -26,9 +25,12 @@ let isDrawing = false;
 let isSpaceHeld = false;
 let isPanning = false;
 let speckleColorMode = 'single';
+let selectedSpeckleColor = null;
+let selectedMergeColor = null;
 let panStart = { x: 0, y: 0, scrollLeft: 0, scrollTop: 0 };
 let history = [];
 let strokeSnapshotTaken = false;
+let pageDragDepth = 0;
 
 const shapeSelector = 'path,rect,circle,ellipse,polygon,polyline';
 
@@ -167,20 +169,33 @@ function renderPalette(paletteEl, colors, onPick) {
 
 function rebuildColorPalettes() {
   const colors = getSvgPaletteColors();
+
+  if (colors.length === 0) {
+    selectedSpeckleColor = null;
+    selectedMergeColor = null;
+  } else {
+    if (!selectedSpeckleColor || !colors.includes(selectedSpeckleColor)) {
+      selectedSpeckleColor = colors[0];
+    }
+    if (!selectedMergeColor || !colors.includes(selectedMergeColor)) {
+      selectedMergeColor = colors[0];
+    }
+  }
+
   renderPalette(specklePaletteEl, colors, (color) => {
     speckleColorMode = 'single';
     allColorsBtn.classList.remove('active');
-    speckleColorEl.value = rgbToHex(color);
+    selectedSpeckleColor = color;
     selectSwatch(specklePaletteEl, color);
   });
 
   renderPalette(mergePaletteEl, colors, (color) => {
-    mergeColorEl.value = rgbToHex(color);
+    selectedMergeColor = color;
     selectSwatch(mergePaletteEl, color);
   });
 
-  selectSwatch(specklePaletteEl, normalizeColor(speckleColorEl.value));
-  selectSwatch(mergePaletteEl, normalizeColor(mergeColorEl.value));
+  selectSwatch(specklePaletteEl, selectedSpeckleColor);
+  selectSwatch(mergePaletteEl, selectedMergeColor);
 }
 
 function loadSvgText(text, filename = 'SVG') {
@@ -326,6 +341,79 @@ function findContainerOfColor(items, innerItem, targetColor) {
   return candidates[0] || null;
 }
 
+function getDominantEdgeFill(items) {
+  const svgBox = loadedSvg.getBBox();
+  const eps = 0.75;
+  const touchingEdge = (box) => (
+    box.x <= svgBox.x + eps ||
+    box.y <= svgBox.y + eps ||
+    box.x + box.width >= svgBox.x + svgBox.width - eps ||
+    box.y + box.height >= svgBox.y + svgBox.height - eps
+  );
+
+  const edgeItems = items.filter((item) => item.fill && touchingEdge(item.box));
+  if (edgeItems.length === 0) return null;
+
+  const areaByFill = new Map();
+  edgeItems.forEach((item) => {
+    areaByFill.set(item.fill, (areaByFill.get(item.fill) || 0) + item.area);
+  });
+  const dominantFill = [...areaByFill.entries()].sort((a, b) => b[1] - a[1])[0][0];
+  return dominantFill;
+}
+
+function removeByColor(fillColor) {
+  const all = getShapeItems();
+  let removed = 0;
+  all.forEach((item) => {
+    if (item.fill === fillColor) {
+      item.el.remove();
+      removed += 1;
+    }
+  });
+  return removed;
+}
+
+function flattenBackground() {
+  if (!loadedSvg) return setStatus('Load an SVG first.');
+  const all = getShapeItems();
+  const dominantFill = getDominantEdgeFill(all);
+  if (!dominantFill) {
+    setStatus('No edge-touching color found for flattening.');
+    return;
+  }
+
+  pushHistory();
+  const removed = removeByColor(dominantFill);
+  const svgBox = loadedSvg.getBBox();
+
+  const background = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  background.setAttribute(
+    'd',
+    `M${svgBox.x} ${svgBox.y} H${svgBox.x + svgBox.width} V${svgBox.y + svgBox.height} H${svgBox.x} Z`
+  );
+  background.setAttribute('fill', rgbToHex(dominantFill));
+  loadedSvg.prepend(background);
+
+  rebuildColorPalettes();
+  setStatus(`Flattened background color ${rgbToHex(dominantFill)} by replacing ${removed} shape(s).`);
+}
+
+function removeBackgroundColor() {
+  if (!loadedSvg) return setStatus('Load an SVG first.');
+  const all = getShapeItems();
+  const dominantFill = getDominantEdgeFill(all);
+  if (!dominantFill) {
+    setStatus('No edge-touching color found to remove.');
+    return;
+  }
+
+  pushHistory();
+  const removed = removeByColor(dominantFill);
+  rebuildColorPalettes();
+  setStatus(`Removed ${removed} shape(s) using edge color ${rgbToHex(dominantFill)}.`);
+}
+
 function screenToSvgPoint(clientX, clientY) {
   const rect = loadedSvg.getBoundingClientRect();
   return { x: (clientX - rect.left) / zoom, y: (clientY - rect.top) / zoom };
@@ -348,8 +436,10 @@ function performBrushPass(clientX, clientY) {
 
   const minArea = Number(speckleAreaEl.value) || 0;
   const brushRadius = Number(brushSizeEl.value) || 1;
-  const sourceColor = normalizeColor(speckleColorEl.value);
-  const targetColor = normalizeColor(mergeColorEl.value);
+  const sourceColor = selectedSpeckleColor;
+  const targetColor = selectedMergeColor;
+  if (!targetColor) return;
+
   const pointer = screenToSvgPoint(clientX, clientY);
   const items = getShapeItems();
 
@@ -361,7 +451,7 @@ function performBrushPass(clientX, clientY) {
 
   let changed = 0;
   for (const item of touched) {
-    item.el.setAttribute('fill', mergeColorEl.value);
+    item.el.setAttribute('fill', rgbToHex(targetColor));
     changed += 1;
   }
 
@@ -371,88 +461,32 @@ function performBrushPass(clientX, clientY) {
   }
 }
 
-function flattenBackground() {
-  if (!loadedSvg) return setStatus('Load an SVG first.');
-  pushHistory();
-
-  const all = getShapeItems();
-  const svgBox = loadedSvg.getBBox();
-  const eps = 0.75;
-  const touchingEdge = (box) => (
-    box.x <= svgBox.x + eps ||
-    box.y <= svgBox.y + eps ||
-    box.x + box.width >= svgBox.x + svgBox.width - eps ||
-    box.y + box.height >= svgBox.y + svgBox.height - eps
-  );
-
-  const edgeItems = all.filter((item) => item.fill && touchingEdge(item.box));
-  if (edgeItems.length === 0) {
-    setStatus('No edge-contact shapes found for flattening.');
-    return;
-  }
-
-  const counts = new Map();
-  edgeItems.forEach((item) => counts.set(item.fill, (counts.get(item.fill) || 0) + 1));
-  const dominantFill = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
-  const candidates = edgeItems.filter((item) => item.fill === dominantFill);
-
-  const dParts = [];
-  candidates.forEach((item) => {
-    if (item.el.tagName.toLowerCase() === 'path' && item.el.getAttribute('d')) {
-      dParts.push(item.el.getAttribute('d'));
-    }
-    item.el.remove();
-  });
-
-  const background = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-  background.setAttribute(
-    'd',
-    dParts.length > 0
-      ? dParts.join(' ')
-      : `M${svgBox.x} ${svgBox.y} H${svgBox.x + svgBox.width} V${svgBox.y + svgBox.height} H${svgBox.x} Z`
-  );
-  background.setAttribute('fill', rgbToHex(dominantFill));
-  loadedSvg.prepend(background);
-  rebuildColorPalettes();
-  setStatus(`Flattened background with ${candidates.length} edge-contact shape(s).`);
+function showDropOverlay() {
+  dropOverlay.classList.add('active');
+  dropOverlay.setAttribute('aria-hidden', 'false');
 }
 
-['dragenter', 'dragover'].forEach((eventName) => {
-  dropZone.addEventListener(eventName, (event) => {
-    event.preventDefault();
-    dropZone.classList.add('dragover');
-  });
-});
+function hideDropOverlay() {
+  dropOverlay.classList.remove('active');
+  dropOverlay.setAttribute('aria-hidden', 'true');
+}
 
-['dragleave', 'drop'].forEach((eventName) => {
-  dropZone.addEventListener(eventName, (event) => {
-    event.preventDefault();
-    dropZone.classList.remove('dragover');
-  });
-});
-
-dropZone.addEventListener('drop', (event) => handleFile(event.dataTransfer?.files?.[0]));
 fileInput.addEventListener('change', () => handleFile(fileInput.files?.[0]));
 
 allColorsBtn.addEventListener('click', () => {
-  speckleColorMode = 'all';
-  allColorsBtn.classList.add('active');
-  [...specklePaletteEl.querySelectorAll('.color-swatch')].forEach((sw) => sw.classList.remove('active'));
-});
-
-speckleColorEl.addEventListener('input', () => {
-  speckleColorMode = 'single';
-  allColorsBtn.classList.remove('active');
-  selectSwatch(specklePaletteEl, normalizeColor(speckleColorEl.value));
-});
-
-mergeColorEl.addEventListener('input', () => {
-  selectSwatch(mergePaletteEl, normalizeColor(mergeColorEl.value));
+  speckleColorMode = speckleColorMode === 'all' ? 'single' : 'all';
+  allColorsBtn.classList.toggle('active', speckleColorMode === 'all');
+  if (speckleColorMode === 'all') {
+    [...specklePaletteEl.querySelectorAll('.color-swatch')].forEach((sw) => sw.classList.remove('active'));
+  } else {
+    selectSwatch(specklePaletteEl, selectedSpeckleColor);
+  }
 });
 
 downloadBtn.addEventListener('click', downloadUpdatedSvg);
 undoBtn.addEventListener('click', undoStep);
 flattenBgBtn.addEventListener('click', flattenBackground);
+removeBgBtn.addEventListener('click', removeBackgroundColor);
 togglePinkBgBtn.addEventListener('click', () => {
   canvasWrap.classList.toggle('hot-pink-preview');
   setStatus(canvasWrap.classList.contains('hot-pink-preview')
@@ -553,6 +587,30 @@ document.addEventListener('mouseup', () => {
   isDrawing = false;
   isPanning = false;
   canvasWrap.classList.remove('panning');
+});
+
+document.addEventListener('dragenter', (event) => {
+  event.preventDefault();
+  pageDragDepth += 1;
+  showDropOverlay();
+});
+
+document.addEventListener('dragover', (event) => {
+  event.preventDefault();
+  showDropOverlay();
+});
+
+document.addEventListener('dragleave', (event) => {
+  event.preventDefault();
+  pageDragDepth = Math.max(0, pageDragDepth - 1);
+  if (pageDragDepth === 0) hideDropOverlay();
+});
+
+document.addEventListener('drop', (event) => {
+  event.preventDefault();
+  pageDragDepth = 0;
+  hideDropOverlay();
+  handleFile(event.dataTransfer?.files?.[0]);
 });
 
 brushSizeEl.addEventListener('input', updateBrushPreviewSize);
