@@ -418,16 +418,16 @@ function unionSameColorPathsForExport(svgEl) {
   scope.setup(canvas);
 
   const imported = scope.project.importSVG(svgEl, { expandShapes: true });
-  const items = [];
+  scope.project.activeLayer.addChild(imported);
 
-  imported.getItems({ class: scope.Path }).forEach((item) => {
-    if (!item.fillColor) return;
-    items.push(item);
+  const paths = scope.project.getItems({
+    class: scope.Path,
+    match: item => item.fillColor
   });
 
   const groupsByFill = new Map();
 
-  items.forEach((item) => {
+  paths.forEach((item) => {
     const fill = item.fillColor.toCSS(true);
     if (!groupsByFill.has(fill)) groupsByFill.set(fill, []);
     groupsByFill.get(fill).push(item);
@@ -447,7 +447,12 @@ function unionSameColorPathsForExport(svgEl) {
     });
   });
 
-  const exported = scope.project.exportSVG({ asString: false });
+  // Export ONLY the children, not project wrapper
+  const layer = scope.project.activeLayer;
+  const tempGroup = new scope.Group(layer.children.slice());
+
+  const exported = tempGroup.exportSVG({ asString: false });
+
   scope.project.clear();
   scope.remove();
 
