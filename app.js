@@ -19,6 +19,9 @@ const zoomInBtn = document.getElementById('zoomIn');
 const zoomOutBtn = document.getElementById('zoomOut');
 const zoomResetBtn = document.getElementById('zoomReset');
 
+const shapeSelector = 'path,rect,circle,ellipse,polygon,polyline,line';
+const MAX_HISTORY = 30;
+
 let zoom = 1;
 let loadedSvg = null;
 let loadedFilename = 'updated.svg';
@@ -30,11 +33,8 @@ let selectedSpeckleColor = null;
 let selectedMergeColor = null;
 let panStart = { x: 0, y: 0, scrollLeft: 0, scrollTop: 0 };
 let history = [];
-let strokeSnapshotTaken = false;
 let pageDragDepth = 0;
 let renderMode = 'fill';
-
-const shapeSelector = 'path,rect,circle,ellipse,polygon,polyline,line';
 
 function setStatus(message) {
   statusEl.textContent = message;
@@ -69,35 +69,8 @@ function getComputedFill(el) {
   if (direct) return direct;
   const styleFill = normalizeColor(el.style.fill || '');
   if (styleFill) return styleFill;
-  if (el.ownerSVGElement) {
-    return normalizeColor(getComputedStyle(el).fill);
-  }
-  return null;
-}
-
-function getSvgViewportRect() {
-  const viewBox = loadedSvg.viewBox?.baseVal;
-  if (viewBox && viewBox.width > 0 && viewBox.height > 0) {
-    return { x: viewBox.x, y: viewBox.y, width: viewBox.width, height: viewBox.height };
-  }
-
-  const width = Number.parseFloat(loadedSvg.getAttribute('width'));
-  const height = Number.parseFloat(loadedSvg.getAttribute('height'));
-  if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
-    return { x: 0, y: 0, width, height };
-  }
-
-  return loadedSvg.getBBox();
-}
-
-function applyZoom() {
-  svgStage.style.transform = `scale(${zoom})`;
-  zoomResetBtn.textContent = `${Math.round(zoom * 100)}%`;
-  updateBrushPreviewSize();
-}
-
-function clampZoom(value) {
-  return Math.max(0.1, Math.min(8, value));
+  if (!el.ownerSVGElement) return null;
+  return normalizeColor(getComputedStyle(el).fill);
 }
 
 function snapshotSvg() {
@@ -105,13 +78,17 @@ function snapshotSvg() {
   return new XMLSerializer().serializeToString(loadedSvg);
 }
 
-function pushHistory() {
-  if (!loadedSvg) return;
-  const snap = snapshotSvg();
-  if (!snap) return;
-  history.push(snap);
-  if (history.length > 4) history = history.slice(-4);
+function pushHistorySnapshot(markup) {
+  if (!markup) return;
+  history.push(markup);
+  if (history.length > MAX_HISTORY) {
+    history = history.slice(-MAX_HISTORY);
+  }
   undoBtn.disabled = history.length === 0;
+}
+
+function captureHistory() {
+  pushHistorySnapshot(snapshotSvg());
 }
 
 function restoreFromMarkup(markup) {
@@ -128,39 +105,6 @@ function restoreFromMarkup(markup) {
   return true;
 }
 
-function booleanUnitePaths(pathAEl, pathBEl) {
-  const scope = new paper.PaperScope();
-  scope.setup(document.createElement('canvas'));
-
-  const a = scope.project.importSVG(pathAEl.cloneNode(true));
-  const b = scope.project.importSVG(pathBEl.cloneNode(true));
-
-  const united = a.unite(b);
-
-  const svg = united.exportSVG({ asString: true });
-  scope.project.clear();
-
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(svg, 'image/svg+xml');
-  return doc.querySelector('path');
-}
-
-function findUnderlyingShape(speckle, items) {
-  const center = {
-    x: speckle.box.x + speckle.box.width / 2,
-    y: speckle.box.y + speckle.box.height / 2
-  };
-
-  const candidates = items.filter((i) =>
-    i.el !== speckle.el &&
-    i.area > speckle.area &&
-    i.geometry?.isPointInFill?.(new DOMPoint(center.x, center.y))
-  );
-
-  candidates.sort((a, b) => a.area - b.area);
-  return candidates[0] || null;
-}
-
 function undoStep() {
   const last = history.pop();
   if (!last) {
@@ -174,25 +118,49 @@ function undoStep() {
   setStatus(ok ? `Undo complete. Remaining undo steps: ${history.length}.` : 'Undo failed due to parse error.');
 }
 
+function toGlobalPoint(el, x, y) {
+  const matrix = el.getCTM();
+  if (!matrix) return { x, y };
+  const p = new DOMPoint(x, y).matrixTransform(matrix);
+  return { x: p.x, y: p.y };
+}
+
+function getGlobalBBox(el) {
+  const box = el.getBBox();
+  const corners = [
+    toGlobalPoint(el, box.x, box.y),
+    toGlobalPoint(el, box.x + box.width, box.y),
+    toGlobalPoint(el, box.x, box.y + box.height),
+    toGlobalPoint(el, box.x + box.width, box.y + box.height)
+  ];
+  const xs = corners.map((p) => p.x);
+  const ys = corners.map((p) => p.y);
+  return {
+    x: Math.min(...xs),
+    y: Math.min(...ys),
+    width: Math.max(...xs) - Math.min(...xs),
+    height: Math.max(...ys) - Math.min(...ys)
+  };
+}
+
 function getShapeItems() {
-  return [...loadedSvg.querySelectorAll(shapeSelector)].map((el) => {
-    try {
+  if (!loadedSvg) return [];
+  return [...loadedSvg.querySelectorAll(shapeSelector)]
+    .map((el) => {
       const box = getGlobalBBox(el);
       return {
         el,
         box,
         area: box.width * box.height,
         fill: getComputedFill(el),
-        geometry: el instanceof SVGGeometryElement ? el : null
+        geometry: el instanceof SVGGeometryElement ? el : null,
+        center: { x: box.x + box.width / 2, y: box.y + box.height / 2 }
       };
-    } catch {
-      return null;
-    }
-  }).filter(Boolean);
+    })
+    .filter((item) => Number.isFinite(item.area) && item.area > 0);
 }
 
 function getSvgPaletteColors() {
-  if (!loadedSvg) return [];
   const unique = new Set();
   getShapeItems().forEach((item) => {
     if (item.fill) unique.add(item.fill);
@@ -273,70 +241,37 @@ function loadSvgText(text, filename = 'SVG') {
   setStatus(`Loaded ${filename}. Found ${loadedSvg.querySelectorAll(shapeSelector).length} drawable shapes.`);
 }
 
-function autoUniteSpeckles() {
-  // No auto containment merging needed.
-  return 0;
-}
-
-function downloadUpdatedSvg() {
-  if (!loadedSvg) return setStatus('Load an SVG first.');
-  const merged = autoUniteSpeckles();
-  const markup = new XMLSerializer().serializeToString(loadedSvg);
-  const blob = new Blob([markup], { type: 'image/svg+xml;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  const outputName = loadedFilename.replace(/\.svg$/i, '') + '-updated.svg';
-  a.href = url;
-  a.download = outputName;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-  setStatus(`Downloaded ${outputName}.${merged > 0 ? ` Auto-united ${merged} speckle(s).` : ''}`);
-}
-
 function handleFile(file) {
-  if (!file) return setStatus('Please provide an SVG file.');
+  if (!file) {
+    setStatus('Please provide an SVG file.');
+    return;
+  }
+
   const looksLikeSvg = file.name.toLowerCase().endsWith('.svg') || file.type === 'image/svg+xml';
-  file.text().then((content) => {
-    if (!looksLikeSvg && !content.includes('<svg')) {
-      setStatus('That file does not look like SVG content.');
-      return;
-    }
-    loadSvgText(content, file.name || 'SVG');
-  }).catch(() => setStatus('Unable to read that file.'));
+  file.text()
+    .then((content) => {
+      if (!looksLikeSvg && !content.includes('<svg')) {
+        setStatus('That file does not look like SVG content.');
+        return;
+      }
+      loadSvgText(content, file.name || 'SVG');
+    })
+    .catch(() => setStatus('Unable to read that file.'));
 }
 
-function toGlobalPoint(el, x, y) {
-  const matrix = el.getCTM();
-  if (!matrix) return { x, y };
-  const p = new DOMPoint(x, y).matrixTransform(matrix);
-  return { x: p.x, y: p.y };
-}
+function getSvgViewportRect() {
+  const viewBox = loadedSvg.viewBox?.baseVal;
+  if (viewBox && viewBox.width > 0 && viewBox.height > 0) {
+    return { x: viewBox.x, y: viewBox.y, width: viewBox.width, height: viewBox.height };
+  }
 
-function toLocalPoint(el, x, y) {
-  const matrix = el.getCTM();
-  if (!matrix) return { x, y };
-  const p = new DOMPoint(x, y).matrixTransform(matrix.inverse());
-  return { x: p.x, y: p.y };
-}
+  const width = Number.parseFloat(loadedSvg.getAttribute('width'));
+  const height = Number.parseFloat(loadedSvg.getAttribute('height'));
+  if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+    return { x: 0, y: 0, width, height };
+  }
 
-function getGlobalBBox(el) {
-  const box = el.getBBox();
-  const corners = [
-    toGlobalPoint(el, box.x, box.y),
-    toGlobalPoint(el, box.x + box.width, box.y),
-    toGlobalPoint(el, box.x, box.y + box.height),
-    toGlobalPoint(el, box.x + box.width, box.y + box.height)
-  ];
-  const xs = corners.map((p) => p.x);
-  const ys = corners.map((p) => p.y);
-  return {
-    x: Math.min(...xs),
-    y: Math.min(...ys),
-    width: Math.max(...xs) - Math.min(...xs),
-    height: Math.max(...ys) - Math.min(...ys)
-  };
+  return loadedSvg.getBBox();
 }
 
 function circleIntersectsBox(center, radius, box) {
@@ -345,6 +280,67 @@ function circleIntersectsBox(center, radius, box) {
   const dx = center.x - nearestX;
   const dy = center.y - nearestY;
   return dx * dx + dy * dy <= radius * radius;
+}
+
+function screenToSvgPoint(clientX, clientY) {
+  const rect = loadedSvg.getBoundingClientRect();
+  return { x: (clientX - rect.left) / zoom, y: (clientY - rect.top) / zoom };
+}
+
+function applyFill(item, fill) {
+  item.el.setAttribute('fill', rgbToHex(fill));
+  if (item.el.dataset.renderOriginalFill !== undefined) {
+    item.el.dataset.renderOriginalFill = rgbToHex(fill);
+  }
+}
+
+function pickMergeColorForSpeckle(speckle, items) {
+  if (selectedMergeColor) return selectedMergeColor;
+
+  const candidates = items
+    .filter((item) => item.el !== speckle.el && item.area > speckle.area && item.fill)
+    .filter((item) => {
+      if (!item.geometry) return false;
+      return item.geometry.isPointInFill(new DOMPoint(speckle.center.x, speckle.center.y));
+    })
+    .sort((a, b) => a.area - b.area);
+
+  return candidates[0]?.fill || null;
+}
+
+function performBrushPass(clientX, clientY) {
+  if (!loadedSvg) return;
+
+  const minArea = Number(speckleAreaEl.value) || 0;
+  const brushRadius = Number(brushSizeEl.value) || 1;
+  const sourceColor = selectedSpeckleColor;
+  const pointer = screenToSvgPoint(clientX, clientY);
+
+  const items = getShapeItems();
+  const touched = items.filter((item) => {
+    if (item.area > minArea) return false;
+    if (!circleIntersectsBox(pointer, brushRadius, item.box)) return false;
+    return speckleColorMode === 'all' ? Boolean(item.fill) : item.fill === sourceColor;
+  });
+
+  if (touched.length === 0) return;
+
+  const before = snapshotSvg();
+  let changed = 0;
+
+  touched.forEach((speckle) => {
+    if (!speckle.el.isConnected || !speckle.fill) return;
+    const mergeColor = pickMergeColorForSpeckle(speckle, items);
+    if (!mergeColor || mergeColor === speckle.fill) return;
+    applyFill(speckle, mergeColor);
+    changed += 1;
+  });
+
+  if (changed === 0) return;
+  pushHistorySnapshot(before);
+  applyRenderMode();
+  rebuildColorPalettes();
+  setStatus(`Merged ${changed} speckle(s) into ${rgbToHex(selectedMergeColor || '#000000')}.`);
 }
 
 function getEdgeTouchingItems(items, targetFill = null) {
@@ -370,31 +366,23 @@ function getDominantEdgeFill(items) {
   edgeItems.forEach((item) => {
     areaByFill.set(item.fill, (areaByFill.get(item.fill) || 0) + item.area);
   });
-  const dominantFill = [...areaByFill.entries()].sort((a, b) => b[1] - a[1])[0][0];
-  return dominantFill;
+  return [...areaByFill.entries()].sort((a, b) => b[1] - a[1])[0][0];
 }
 
 function removeEdgeTouchingByColor(fillColor) {
   const all = getShapeItems();
   const edgeItems = getEdgeTouchingItems(all, fillColor);
-  let removed = 0;
-  edgeItems.forEach((item) => {
-    item.el.remove();
-    removed += 1;
-  });
-  return removed;
+  edgeItems.forEach((item) => item.el.remove());
+  return edgeItems.length;
 }
 
 function flattenBackground() {
   if (!loadedSvg) return setStatus('Load an SVG first.');
   const all = getShapeItems();
   const dominantFill = getDominantEdgeFill(all);
-  if (!dominantFill) {
-    setStatus('No edge-touching color found for flattening.');
-    return;
-  }
+  if (!dominantFill) return setStatus('No edge-touching color found for flattening.');
 
-  pushHistory();
+  captureHistory();
   const removed = removeEdgeTouchingByColor(dominantFill);
   const svgBox = getSvgViewportRect();
 
@@ -415,33 +403,50 @@ function removeBackgroundColor() {
   if (!loadedSvg) return setStatus('Load an SVG first.');
   const all = getShapeItems();
   const dominantFill = getDominantEdgeFill(all);
-  if (!dominantFill) {
-    setStatus('No edge-touching color found to remove.');
-    return;
-  }
+  if (!dominantFill) return setStatus('No edge-touching color found to remove.');
 
-  pushHistory();
+  captureHistory();
   const removed = removeEdgeTouchingByColor(dominantFill);
   applyRenderMode();
   rebuildColorPalettes();
   setStatus(`Removed ${removed} shape(s) using edge color ${rgbToHex(dominantFill)}.`);
 }
 
+function downloadUpdatedSvg() {
+  if (!loadedSvg) return setStatus('Load an SVG first.');
+  const markup = new XMLSerializer().serializeToString(loadedSvg);
+  const blob = new Blob([markup], { type: 'image/svg+xml;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const outputName = loadedFilename.replace(/\.svg$/i, '') + '-updated.svg';
+  a.href = url;
+  a.download = outputName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  setStatus(`Downloaded ${outputName}.`);
+}
+
 function applyRenderMode() {
   if (!loadedSvg) return;
   const shapes = loadedSvg.querySelectorAll(shapeSelector);
+
   if (renderMode === 'stroke') {
     shapes.forEach((shape) => {
-      if (!shape.dataset.renderOriginalFill) {
+      if (shape.dataset.renderOriginalFill === undefined) {
         shape.dataset.renderOriginalFill = shape.getAttribute('fill') || '';
       }
-      if (!shape.dataset.renderOriginalStroke) {
+      if (shape.dataset.renderOriginalStroke === undefined) {
         shape.dataset.renderOriginalStroke = shape.getAttribute('stroke') || '';
       }
-      if (!shape.dataset.renderOriginalStrokeWidth) {
+      if (shape.dataset.renderOriginalStrokeWidth === undefined) {
         shape.dataset.renderOriginalStrokeWidth = shape.getAttribute('stroke-width') || '';
       }
-      const fallbackColor = normalizeColor(shape.dataset.renderOriginalStroke) || normalizeColor(shape.dataset.renderOriginalFill) || '#bdbdbd';
+
+      const fallbackColor = normalizeColor(shape.dataset.renderOriginalStroke)
+        || normalizeColor(shape.dataset.renderOriginalFill)
+        || '#bdbdbd';
       shape.setAttribute('fill', 'none');
       shape.setAttribute('stroke', rgbToHex(fallbackColor));
       shape.setAttribute('stroke-width', '0.75');
@@ -452,6 +457,7 @@ function applyRenderMode() {
       const originalFill = shape.dataset.renderOriginalFill;
       const originalStroke = shape.dataset.renderOriginalStroke;
       const originalStrokeWidth = shape.dataset.renderOriginalStrokeWidth;
+
       if (originalFill !== undefined) {
         if (originalFill) shape.setAttribute('fill', originalFill);
         else shape.removeAttribute('fill');
@@ -470,12 +476,18 @@ function applyRenderMode() {
       shape.removeAttribute('vector-effect');
     });
   }
+
   toggleRenderModeBtn.textContent = renderMode === 'stroke' ? 'View: Thin Stroke' : 'View: Filled';
 }
 
-function screenToSvgPoint(clientX, clientY) {
-  const rect = loadedSvg.getBoundingClientRect();
-  return { x: (clientX - rect.left) / zoom, y: (clientY - rect.top) / zoom };
+function applyZoom() {
+  svgStage.style.transform = `scale(${zoom})`;
+  zoomResetBtn.textContent = `${Math.round(zoom * 100)}%`;
+  updateBrushPreviewSize();
+}
+
+function clampZoom(value) {
+  return Math.max(0.1, Math.min(8, value));
 }
 
 function updateBrushPreviewSize() {
@@ -488,49 +500,6 @@ function updateBrushPreviewPosition(event) {
   const wrapRect = canvasWrap.getBoundingClientRect();
   brushPreview.style.left = `${event.clientX - wrapRect.left + canvasWrap.scrollLeft}px`;
   brushPreview.style.top = `${event.clientY - wrapRect.top + canvasWrap.scrollTop}px`;
-}
-
-function performBrushPass(clientX, clientY) {
-  if (!loadedSvg) return;
-
-  const minArea = Number(speckleAreaEl.value) || 0;
-  const brushRadius = Number(brushSizeEl.value) || 1;
-  const sourceColor = selectedSpeckleColor;
-
-  const pointer = screenToSvgPoint(clientX, clientY);
-  const items = getShapeItems();
-
-  const touched = items.filter((item) => {
-    if (item.area <= 0 || item.area > minArea) return false;
-    if (!circleIntersectsBox(pointer, brushRadius, item.box)) return false;
-    return speckleColorMode === 'all' ? Boolean(item.fill) : item.fill === sourceColor;
-  });
-
-  let removed = 0;
-
-  for (const item of touched) {
-    if (!item.el.isConnected) continue;
-
-    const underlying = findUnderlyingShape(item, items);
-    if (!underlying || !underlying.el.isConnected) continue;
-
-    const merged = booleanUnitePaths(underlying.el, item.el);
-    if (!merged) continue;
-
-    [...underlying.el.attributes].forEach((attr) => {
-      if (attr.name !== 'd') merged.setAttribute(attr.name, attr.value);
-    });
-
-    underlying.el.replaceWith(merged);
-    item.el.remove();
-    removed += 1;
-  }
-
-  if (removed > 0) {
-    applyRenderMode();
-    rebuildColorPalettes();
-    setStatus(`United ${removed} speckle(s) into underlying geometry.`);
-  }
 }
 
 function showDropOverlay() {
@@ -561,10 +530,13 @@ flattenBgBtn.addEventListener('click', flattenBackground);
 removeBgBtn.addEventListener('click', removeBackgroundColor);
 togglePinkBgBtn.addEventListener('click', () => {
   canvasWrap.classList.toggle('hot-pink-preview');
-  setStatus(canvasWrap.classList.contains('hot-pink-preview')
-    ? 'Hot pink preview background enabled (saved SVG is unchanged).'
-    : 'Hot pink preview background disabled.');
+  setStatus(
+    canvasWrap.classList.contains('hot-pink-preview')
+      ? 'Hot pink preview background enabled (saved SVG is unchanged).'
+      : 'Hot pink preview background disabled.'
+  );
 });
+
 toggleRenderModeBtn.addEventListener('click', () => {
   if (!loadedSvg) return setStatus('Load an SVG first.');
   renderMode = renderMode === 'fill' ? 'stroke' : 'fill';
@@ -585,12 +557,16 @@ zoomResetBtn.addEventListener('click', () => {
   applyZoom();
 });
 
-canvasWrap.addEventListener('wheel', (event) => {
-  if (!event.ctrlKey) return;
-  event.preventDefault();
-  zoom = clampZoom(zoom * (event.deltaY < 0 ? 1.08 : 0.92));
-  applyZoom();
-}, { passive: false });
+canvasWrap.addEventListener(
+  'wheel',
+  (event) => {
+    if (!event.ctrlKey) return;
+    event.preventDefault();
+    zoom = clampZoom(zoom * (event.deltaY < 0 ? 1.08 : 0.92));
+    applyZoom();
+  },
+  { passive: false }
+);
 
 document.addEventListener('keydown', (event) => {
   if (event.code !== 'Space') return;
@@ -624,13 +600,8 @@ canvasWrap.addEventListener('mousedown', (event) => {
   }
 
   isDrawing = true;
-  strokeSnapshotTaken = false;
   updateBrushPreviewPosition(event);
   brushPreview.style.display = 'block';
-  if (!strokeSnapshotTaken) {
-    pushHistory();
-    strokeSnapshotTaken = true;
-  }
   performBrushPass(event.clientX, event.clientY);
 });
 
@@ -647,8 +618,9 @@ canvasWrap.addEventListener('mousemove', (event) => {
     return;
   }
 
-  if (!isDrawing) return;
-  performBrushPass(event.clientX, event.clientY);
+  if (isDrawing) {
+    performBrushPass(event.clientX, event.clientY);
+  }
 });
 
 canvasWrap.addEventListener('mouseleave', () => {
