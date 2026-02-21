@@ -379,6 +379,8 @@
       function findContainingItem(inner, items, { respectCutouts, allowFillMismatch = false } = {}) {
         if (!inner.el.isConnected) return null;
 
+        const candidates = [];
+
         for (const outer of items) {
           if (!outer.el.isConnected) continue;
           if (outer.el === inner.el) continue;
@@ -394,10 +396,25 @@
             continue;
           }
 
-          return outer;
+          candidates.push(outer);
         }
 
-        return null;
+        if (candidates.length === 0) return null;
+
+        // Prefer the tightest containing shape so tiny speckles merge back into
+        // the local source path rather than a larger distant parent.
+        candidates.sort((a, b) => {
+          const areaDiff = a.area - b.area;
+          if (areaDiff !== 0) return areaDiff;
+
+          const aParentScore = a.el.parentElement === inner.el.parentElement ? -1 : 0;
+          const bParentScore = b.el.parentElement === inner.el.parentElement ? -1 : 0;
+          if (aParentScore !== bParentScore) return aParentScore - bParentScore;
+
+          return 0;
+        });
+
+        return candidates[0];
       }
 
       function mergePathIntoContainer(innerPath, outerPath) {
