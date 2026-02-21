@@ -342,6 +342,39 @@
         return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
       }
 
+      function findContainingItem(inner, items, { respectCutouts, allowFillMismatch = false } = {}) {
+        if (!inner.el.isConnected) return null;
+
+        for (const outer of items) {
+          if (!outer.el.isConnected) continue;
+          if (outer.el === inner.el) continue;
+          if (outer.area <= inner.area) continue;
+          if (!isBBoxInside(inner.box, outer.box)) continue;
+
+          const p = centerOfBox(inner.box);
+          const containsCenter = outer.geometry?.isPointInFill?.(new DOMPoint(p.x, p.y));
+          if (!containsCenter) continue;
+
+          if (!allowFillMismatch && respectCutouts && inner.fill !== outer.fill) {
+            continue;
+          }
+
+          return outer;
+        }
+
+        return null;
+      }
+
+      function mergePathIntoContainer(innerPath, outerPath) {
+        const innerD = innerPath.getAttribute('d');
+        const outerD = outerPath.getAttribute('d');
+        if (!innerD || !outerD) return false;
+
+        outerPath.setAttribute('d', `${outerD} ${innerD}`);
+        innerPath.remove();
+        return true;
+      }
+
       function runDespeckle() {
         if (!loadedSvg) {
           setStatus('Load an SVG first.');
@@ -371,17 +404,28 @@
           .filter(Boolean);
 
         const toRemove = new Set();
+        let mergedIntoContainer = 0;
 
         for (const item of items) {
           if (item.area > 0 && item.area <= minArea) {
-            toRemove.add(item.el);
+            const container = findContainingItem(item, items, { respectCutouts, allowFillMismatch: false });
+            const wasMerged =
+              item.el.tagName.toLowerCase() === 'path' &&
+              container?.el?.tagName?.toLowerCase() === 'path' &&
+              mergePathIntoContainer(item.el, container.el);
+
+            if (wasMerged) {
+              mergedIntoContainer += 1;
+            } else {
+              toRemove.add(item.el);
+            }
           }
         }
 
         if (removeContained) {
           for (let i = 0; i < items.length; i++) {
             const inner = items[i];
-            if (toRemove.has(inner.el) || inner.area === 0) continue;
+            if (!inner.el.isConnected || toRemove.has(inner.el) || inner.area === 0) continue;
 
             for (let j = 0; j < items.length; j++) {
               if (i === j) continue;
@@ -390,15 +434,19 @@
 
               if (!isBBoxInside(inner.box, outer.box)) continue;
 
-              const p = centerOfBox(inner.box);
-              const containsCenter = outer.geometry?.isPointInFill?.(new DOMPoint(p.x, p.y));
-              if (!containsCenter) continue;
+              const container = findContainingItem(inner, [outer], { respectCutouts, allowFillMismatch: false });
+              if (!container) continue;
 
-              if (respectCutouts && inner.fill !== outer.fill) {
-                continue;
+              const wasMerged =
+                inner.el.tagName.toLowerCase() === 'path' &&
+                container.el.tagName.toLowerCase() === 'path' &&
+                mergePathIntoContainer(inner.el, container.el);
+
+              if (wasMerged) {
+                mergedIntoContainer += 1;
+              } else {
+                toRemove.add(inner.el);
               }
-
-              toRemove.add(inner.el);
               break;
             }
           }
@@ -406,7 +454,7 @@
 
         toRemove.forEach((el) => el.remove());
 
-        setStatus(`Despeckle done. Removed ${toRemove.size} shape(s). Remaining: ${loadedSvg.querySelectorAll(shapeSelector).length}.`);
+        setStatus(`Despeckle done. Merged ${mergedIntoContainer} shape(s) into surrounding paths, removed ${toRemove.size} shape(s). Remaining: ${loadedSvg.querySelectorAll(shapeSelector).length}.`);
       }
 
       function mergeBackground() {
