@@ -12,6 +12,7 @@ const brushSizeEl = document.getElementById('brushSize');
 const flattenBgBtn = document.getElementById('flattenBgBtn');
 const removeBgBtn = document.getElementById('removeBgBtn');
 const togglePinkBgBtn = document.getElementById('togglePinkBgBtn');
+const toggleRenderModeBtn = document.getElementById('toggleRenderModeBtn');
 const undoBtn = document.getElementById('undoBtn');
 const downloadBtn = document.getElementById('downloadBtn');
 const zoomInBtn = document.getElementById('zoomIn');
@@ -31,6 +32,7 @@ let panStart = { x: 0, y: 0, scrollLeft: 0, scrollTop: 0 };
 let history = [];
 let strokeSnapshotTaken = false;
 let pageDragDepth = 0;
+let renderMode = 'fill';
 
 const shapeSelector = 'path,rect,circle,ellipse,polygon,polyline';
 
@@ -61,6 +63,8 @@ function normalizeColor(color) {
 }
 
 function getComputedFill(el) {
+  const originalFill = normalizeColor(el.dataset.renderOriginalFill || '');
+  if (originalFill) return originalFill;
   const direct = normalizeColor(el.getAttribute('fill'));
   if (direct) return direct;
   const styleFill = normalizeColor(el.style.fill || '');
@@ -69,6 +73,21 @@ function getComputedFill(el) {
     return normalizeColor(getComputedStyle(el).fill);
   }
   return null;
+}
+
+function getSvgViewportRect() {
+  const viewBox = loadedSvg.viewBox?.baseVal;
+  if (viewBox && viewBox.width > 0 && viewBox.height > 0) {
+    return { x: viewBox.x, y: viewBox.y, width: viewBox.width, height: viewBox.height };
+  }
+
+  const width = Number.parseFloat(loadedSvg.getAttribute('width'));
+  const height = Number.parseFloat(loadedSvg.getAttribute('height'));
+  if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+    return { x: 0, y: 0, width, height };
+  }
+
+  return loadedSvg.getBBox();
 }
 
 function applyZoom() {
@@ -104,6 +123,7 @@ function restoreFromMarkup(markup) {
   loadedSvg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
   svgStage.innerHTML = '';
   svgStage.appendChild(loadedSvg);
+  applyRenderMode();
   rebuildColorPalettes();
   return true;
 }
@@ -212,6 +232,7 @@ function loadSvgText(text, filename = 'SVG') {
   loadedFilename = filename.toLowerCase().endsWith('.svg') ? filename : `${filename}.svg`;
   svgStage.innerHTML = '';
   svgStage.appendChild(loadedSvg);
+  applyRenderMode();
   rebuildColorPalettes();
   downloadBtn.disabled = false;
   history = [];
@@ -223,23 +244,7 @@ function autoUniteSpeckles() {
   if (!loadedSvg) return 0;
   const minArea = Number(speckleAreaEl.value) || 0;
   const items = getShapeItems();
-  let mergedCount = 0;
-
-  for (const item of items) {
-    if (!item.el.isConnected || item.area <= 0 || item.area > minArea || !item.fill) continue;
-    const container = findContainerOfColor(items, item, item.fill);
-    if (!container) continue;
-
-    const mergedAsPath =
-      item.el.tagName.toLowerCase() === 'path' &&
-      container.el.tagName.toLowerCase() === 'path' &&
-      mergePathIntoContainer(item.el, container.el);
-
-    if (!mergedAsPath && item.el.isConnected) {
-      item.el.remove();
-    }
-    mergedCount += 1;
-  }
+  const mergedCount = removeContainedShapesByColor(items, minArea);
 
   if (mergedCount > 0) rebuildColorPalettes();
   return mergedCount;
@@ -318,15 +323,6 @@ function centerOfBox(box) {
   return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
 }
 
-function mergePathIntoContainer(innerPath, outerPath) {
-  const innerD = innerPath.getAttribute('d');
-  const outerD = outerPath.getAttribute('d');
-  if (!innerD || !outerD) return false;
-  outerPath.setAttribute('d', `${outerD} ${innerD}`);
-  innerPath.remove();
-  return true;
-}
-
 function findContainerOfColor(items, innerItem, targetColor) {
   const point = centerOfBox(innerItem.box);
   const candidates = items.filter((outer) => {
@@ -341,17 +337,36 @@ function findContainerOfColor(items, innerItem, targetColor) {
   return candidates[0] || null;
 }
 
-function getDominantEdgeFill(items) {
-  const svgBox = loadedSvg.getBBox();
-  const eps = 0.75;
-  const touchingEdge = (box) => (
-    box.x <= svgBox.x + eps ||
-    box.y <= svgBox.y + eps ||
-    box.x + box.width >= svgBox.x + svgBox.width - eps ||
-    box.y + box.height >= svgBox.y + svgBox.height - eps
-  );
+function removeContainedShapesByColor(items, maxArea) {
+  let removed = 0;
+  for (const item of items) {
+    if (!item.el.isConnected || item.area <= 0 || item.area > maxArea || !item.fill) continue;
+    const container = findContainerOfColor(items, item, item.fill);
+    if (!container) continue;
 
-  const edgeItems = items.filter((item) => item.fill && touchingEdge(item.box));
+    item.el.remove();
+    removed += 1;
+  }
+  return removed;
+}
+
+function getEdgeTouchingItems(items, targetFill = null) {
+  const svgBox = getSvgViewportRect();
+  const eps = 0.75;
+  return items.filter((item) => {
+    if (!item.fill) return false;
+    if (targetFill && item.fill !== targetFill) return false;
+    return (
+      item.box.x <= svgBox.x + eps ||
+      item.box.y <= svgBox.y + eps ||
+      item.box.x + item.box.width >= svgBox.x + svgBox.width - eps ||
+      item.box.y + item.box.height >= svgBox.y + svgBox.height - eps
+    );
+  });
+}
+
+function getDominantEdgeFill(items) {
+  const edgeItems = getEdgeTouchingItems(items);
   if (edgeItems.length === 0) return null;
 
   const areaByFill = new Map();
@@ -362,14 +377,13 @@ function getDominantEdgeFill(items) {
   return dominantFill;
 }
 
-function removeByColor(fillColor) {
+function removeEdgeTouchingByColor(fillColor) {
   const all = getShapeItems();
+  const edgeItems = getEdgeTouchingItems(all, fillColor);
   let removed = 0;
-  all.forEach((item) => {
-    if (item.fill === fillColor) {
-      item.el.remove();
-      removed += 1;
-    }
+  edgeItems.forEach((item) => {
+    item.el.remove();
+    removed += 1;
   });
   return removed;
 }
@@ -384,8 +398,8 @@ function flattenBackground() {
   }
 
   pushHistory();
-  const removed = removeByColor(dominantFill);
-  const svgBox = loadedSvg.getBBox();
+  const removed = removeEdgeTouchingByColor(dominantFill);
+  const svgBox = getSvgViewportRect();
 
   const background = document.createElementNS('http://www.w3.org/2000/svg', 'path');
   background.setAttribute(
@@ -395,6 +409,7 @@ function flattenBackground() {
   background.setAttribute('fill', rgbToHex(dominantFill));
   loadedSvg.prepend(background);
 
+  applyRenderMode();
   rebuildColorPalettes();
   setStatus(`Flattened background color ${rgbToHex(dominantFill)} by replacing ${removed} shape(s).`);
 }
@@ -409,9 +424,56 @@ function removeBackgroundColor() {
   }
 
   pushHistory();
-  const removed = removeByColor(dominantFill);
+  const removed = removeEdgeTouchingByColor(dominantFill);
+  applyRenderMode();
   rebuildColorPalettes();
   setStatus(`Removed ${removed} shape(s) using edge color ${rgbToHex(dominantFill)}.`);
+}
+
+function applyRenderMode() {
+  if (!loadedSvg) return;
+  const shapes = loadedSvg.querySelectorAll(shapeSelector);
+  if (renderMode === 'stroke') {
+    shapes.forEach((shape) => {
+      if (!shape.dataset.renderOriginalFill) {
+        shape.dataset.renderOriginalFill = shape.getAttribute('fill') || '';
+      }
+      if (!shape.dataset.renderOriginalStroke) {
+        shape.dataset.renderOriginalStroke = shape.getAttribute('stroke') || '';
+      }
+      if (!shape.dataset.renderOriginalStrokeWidth) {
+        shape.dataset.renderOriginalStrokeWidth = shape.getAttribute('stroke-width') || '';
+      }
+      const fallbackColor = normalizeColor(shape.dataset.renderOriginalStroke) || normalizeColor(shape.dataset.renderOriginalFill) || '#bdbdbd';
+      shape.setAttribute('fill', 'none');
+      shape.setAttribute('stroke', rgbToHex(fallbackColor));
+      shape.setAttribute('stroke-width', '0.75');
+      shape.setAttribute('vector-effect', 'non-scaling-stroke');
+    });
+  } else {
+    shapes.forEach((shape) => {
+      const originalFill = shape.dataset.renderOriginalFill;
+      const originalStroke = shape.dataset.renderOriginalStroke;
+      const originalStrokeWidth = shape.dataset.renderOriginalStrokeWidth;
+      if (originalFill !== undefined) {
+        if (originalFill) shape.setAttribute('fill', originalFill);
+        else shape.removeAttribute('fill');
+        delete shape.dataset.renderOriginalFill;
+      }
+      if (originalStroke !== undefined) {
+        if (originalStroke) shape.setAttribute('stroke', originalStroke);
+        else shape.removeAttribute('stroke');
+        delete shape.dataset.renderOriginalStroke;
+      }
+      if (originalStrokeWidth !== undefined) {
+        if (originalStrokeWidth) shape.setAttribute('stroke-width', originalStrokeWidth);
+        else shape.removeAttribute('stroke-width');
+        delete shape.dataset.renderOriginalStrokeWidth;
+      }
+      shape.removeAttribute('vector-effect');
+    });
+  }
+  toggleRenderModeBtn.textContent = renderMode === 'stroke' ? 'View: Thin Stroke' : 'View: Filled';
 }
 
 function screenToSvgPoint(clientX, clientY) {
@@ -450,9 +512,18 @@ function performBrushPass(clientX, clientY) {
   });
 
   let changed = 0;
+  const mergedHex = rgbToHex(targetColor);
   for (const item of touched) {
-    item.el.setAttribute('fill', rgbToHex(targetColor));
+    item.el.setAttribute('fill', mergedHex);
+    if (item.el.dataset.renderOriginalFill !== undefined) {
+      item.el.dataset.renderOriginalFill = mergedHex;
+    }
     changed += 1;
+  }
+
+  if (changed > 0) {
+    const updatedItems = getShapeItems();
+    changed += removeContainedShapesByColor(updatedItems, minArea);
   }
 
   if (changed > 0) {
@@ -492,6 +563,12 @@ togglePinkBgBtn.addEventListener('click', () => {
   setStatus(canvasWrap.classList.contains('hot-pink-preview')
     ? 'Hot pink preview background enabled (saved SVG is unchanged).'
     : 'Hot pink preview background disabled.');
+});
+toggleRenderModeBtn.addEventListener('click', () => {
+  if (!loadedSvg) return setStatus('Load an SVG first.');
+  renderMode = renderMode === 'fill' ? 'stroke' : 'fill';
+  applyRenderMode();
+  setStatus(renderMode === 'stroke' ? 'Thin stroke view enabled.' : 'Filled view enabled.');
 });
 
 zoomInBtn.addEventListener('click', () => {
