@@ -412,9 +412,59 @@ function removeBackgroundColor() {
   setStatus(`Removed ${removed} shape(s) using edge color ${rgbToHex(dominantFill)}.`);
 }
 
+function unionSameColorPathsForExport(svgEl) {
+  if (!window.paper) return svgEl;
+
+  const paperScope = new window.paper.PaperScope();
+  const canvas = document.createElement('canvas');
+  paperScope.setup(canvas);
+  paperScope.settings.applyMatrix = true;
+
+  try {
+    paperScope.project.importSVG(svgEl);
+    const pathItems = paperScope.project.getItems({
+      match: (item) => item instanceof paperScope.PathItem && item.closed && Boolean(item.fillColor)
+    });
+
+    const groupsByFill = new Map();
+    pathItems.forEach((item) => {
+      const fillKey = item.fillColor.toCSS(true);
+      if (!groupsByFill.has(fillKey)) groupsByFill.set(fillKey, []);
+      groupsByFill.get(fillKey).push(item);
+    });
+
+    groupsByFill.forEach((group) => {
+      if (group.length < 2) return;
+
+      let merged = group[0].clone({ insert: false });
+      for (let i = 1; i < group.length; i += 1) {
+        const united = merged.unite(group[i], { insert: false });
+        merged.remove();
+        merged = united;
+      }
+
+      merged.fillColor = group[0].fillColor.clone();
+      merged.strokeColor = null;
+      merged.insertAbove(group[0]);
+      group.forEach((item) => item.remove());
+    });
+
+    const exported = paperScope.project.exportSVG({ asString: false, precision: 3 });
+    exported.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    return exported;
+  } catch (error) {
+    console.warn('Path union for export failed; downloading current SVG.', error);
+    return svgEl;
+  } finally {
+    paperScope.project?.clear();
+    paperScope.remove();
+  }
+}
+
 function downloadUpdatedSvg() {
   if (!loadedSvg) return setStatus('Load an SVG first.');
-  const markup = new XMLSerializer().serializeToString(loadedSvg);
+  const exportSvg = unionSameColorPathsForExport(loadedSvg.cloneNode(true));
+  const markup = new XMLSerializer().serializeToString(exportSvg);
   const blob = new Blob([markup], { type: 'image/svg+xml;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -425,7 +475,7 @@ function downloadUpdatedSvg() {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
-  setStatus(`Downloaded ${outputName}.`);
+  setStatus(`Downloaded ${outputName} with same-color paths unioned.`);
 }
 
 function applyRenderMode() {
