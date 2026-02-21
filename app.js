@@ -419,8 +419,16 @@ function unionSameColorPathsForExport(svgEl) {
 
   const imported = scope.project.importSVG(svgEl, { expandShapes: true });
 
-  // Flatten everything into individual paths
-  imported.flatten();
+  // Flatten path geometry when supported (Groups don't implement flatten).
+  if (typeof imported.flatten === 'function') {
+    imported.flatten();
+  }
+
+  scope.project.getItems({ class: scope.Path }).forEach((path) => {
+    if (typeof path.flatten === 'function') {
+      path.flatten();
+    }
+  });
 
   // Convert compound paths into regular paths
   scope.project.getItems({ class: scope.CompoundPath }).forEach(cp => {
