@@ -413,35 +413,45 @@ function removeBackgroundColor() {
 }
 
 function unionSameColorPathsForExport(svgEl) {
-  const pathNodes = [...svgEl.querySelectorAll('path[fill]')]
-    .filter((path) => normalizeColor(path.getAttribute('fill')));
+  const scope = new paper.PaperScope();
+  const canvas = document.createElement('canvas');
+  scope.setup(canvas);
+
+  const imported = scope.project.importSVG(svgEl, { expandShapes: true });
+  const items = [];
+
+  imported.getItems({ class: scope.Path }).forEach((item) => {
+    if (!item.fillColor) return;
+    items.push(item);
+  });
 
   const groupsByFill = new Map();
-  pathNodes.forEach((path) => {
-    const fill = normalizeColor(path.getAttribute('fill'));
-    if (!fill) return;
+
+  items.forEach((item) => {
+    const fill = item.fillColor.toCSS(true);
     if (!groupsByFill.has(fill)) groupsByFill.set(fill, []);
-    groupsByFill.get(fill).push(path);
+    groupsByFill.get(fill).push(item);
   });
 
   groupsByFill.forEach((group) => {
     if (group.length < 2) return;
-    const combined = group
-      .map((path) => path.getAttribute('d') || '')
-      .filter(Boolean)
-      .join(' ')
-      .trim();
 
-    if (!combined) return;
+    let united = group[0];
 
-    const keeper = group[0];
-    keeper.setAttribute('d', combined);
-    for (let i = 1; i < group.length; i += 1) {
-      group[i].remove();
+    for (let i = 1; i < group.length; i++) {
+      united = united.unite(group[i]);
     }
+
+    group.forEach((item) => {
+      if (item !== united) item.remove();
+    });
   });
 
-  return svgEl;
+  const exported = scope.project.exportSVG({ asString: false });
+  scope.project.clear();
+  scope.remove();
+
+  return exported;
 }
 
 function downloadUpdatedSvg() {
