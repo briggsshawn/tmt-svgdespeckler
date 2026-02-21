@@ -7,8 +7,12 @@ const statusEl = document.getElementById('status');
 const speckleAreaEl = document.getElementById('speckleArea');
 const speckleColorEl = document.getElementById('speckleColor');
 const mergeColorEl = document.getElementById('mergeColor');
+const specklePaletteEl = document.getElementById('specklePalette');
+const mergePaletteEl = document.getElementById('mergePalette');
+const allColorsBtn = document.getElementById('allColorsBtn');
 const brushSizeEl = document.getElementById('brushSize');
 const flattenBgBtn = document.getElementById('flattenBgBtn');
+const togglePinkBgBtn = document.getElementById('togglePinkBgBtn');
 const undoBtn = document.getElementById('undoBtn');
 const downloadBtn = document.getElementById('downloadBtn');
 const zoomInBtn = document.getElementById('zoomIn');
@@ -21,6 +25,7 @@ let loadedFilename = 'updated.svg';
 let isDrawing = false;
 let isSpaceHeld = false;
 let isPanning = false;
+let speckleColorMode = 'single';
 let panStart = { x: 0, y: 0, scrollLeft: 0, scrollTop: 0 };
 let history = [];
 let strokeSnapshotTaken = false;
@@ -38,6 +43,13 @@ function hexToRgb(hex) {
   return `rgb(${(int >> 16) & 255}, ${(int >> 8) & 255}, ${int & 255})`;
 }
 
+function rgbToHex(rgb) {
+  const m = rgb.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
+  if (!m) return '#000000';
+  const [r, g, b] = [m[1], m[2], m[3]].map((n) => Number(n).toString(16).padStart(2, '0'));
+  return `#${r}${g}${b}`;
+}
+
 function normalizeColor(color) {
   if (!color) return null;
   const t = color.trim().toLowerCase();
@@ -52,8 +64,7 @@ function getComputedFill(el) {
   const styleFill = normalizeColor(el.style.fill || '');
   if (styleFill) return styleFill;
   if (el.ownerSVGElement) {
-    const computed = getComputedStyle(el).fill;
-    return normalizeColor(computed);
+    return normalizeColor(getComputedStyle(el).fill);
   }
   return null;
 }
@@ -91,6 +102,7 @@ function restoreFromMarkup(markup) {
   loadedSvg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
   svgStage.innerHTML = '';
   svgStage.appendChild(loadedSvg);
+  rebuildColorPalettes();
   return true;
 }
 
@@ -104,11 +116,71 @@ function undoStep() {
 
   const ok = restoreFromMarkup(last);
   undoBtn.disabled = history.length === 0;
-  if (ok) {
-    setStatus(`Undo complete. Remaining undo steps: ${history.length}.`);
-  } else {
-    setStatus('Undo failed due to parse error.');
-  }
+  setStatus(ok ? `Undo complete. Remaining undo steps: ${history.length}.` : 'Undo failed due to parse error.');
+}
+
+function getShapeItems() {
+  return [...loadedSvg.querySelectorAll(shapeSelector)].map((el) => {
+    try {
+      const box = getGlobalBBox(el);
+      return {
+        el,
+        box,
+        area: box.width * box.height,
+        fill: getComputedFill(el),
+        geometry: el instanceof SVGGeometryElement ? el : null
+      };
+    } catch {
+      return null;
+    }
+  }).filter(Boolean);
+}
+
+function getSvgPaletteColors() {
+  if (!loadedSvg) return [];
+  const unique = new Set();
+  getShapeItems().forEach((item) => {
+    if (item.fill) unique.add(item.fill);
+  });
+  return [...unique].sort();
+}
+
+function selectSwatch(paletteEl, color) {
+  [...paletteEl.querySelectorAll('.color-swatch')].forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.color === color);
+  });
+}
+
+function renderPalette(paletteEl, colors, onPick) {
+  paletteEl.innerHTML = '';
+  colors.forEach((color) => {
+    const swatch = document.createElement('button');
+    swatch.type = 'button';
+    swatch.className = 'color-swatch';
+    swatch.title = `${rgbToHex(color)} / ${color}`;
+    swatch.style.background = color;
+    swatch.dataset.color = color;
+    swatch.addEventListener('click', () => onPick(color));
+    paletteEl.appendChild(swatch);
+  });
+}
+
+function rebuildColorPalettes() {
+  const colors = getSvgPaletteColors();
+  renderPalette(specklePaletteEl, colors, (color) => {
+    speckleColorMode = 'single';
+    allColorsBtn.classList.remove('active');
+    speckleColorEl.value = rgbToHex(color);
+    selectSwatch(specklePaletteEl, color);
+  });
+
+  renderPalette(mergePaletteEl, colors, (color) => {
+    mergeColorEl.value = rgbToHex(color);
+    selectSwatch(mergePaletteEl, color);
+  });
+
+  selectSwatch(specklePaletteEl, normalizeColor(speckleColorEl.value));
+  selectSwatch(mergePaletteEl, normalizeColor(mergeColorEl.value));
 }
 
 function loadSvgText(text, filename = 'SVG') {
@@ -125,14 +197,42 @@ function loadSvgText(text, filename = 'SVG') {
   loadedFilename = filename.toLowerCase().endsWith('.svg') ? filename : `${filename}.svg`;
   svgStage.innerHTML = '';
   svgStage.appendChild(loadedSvg);
+  rebuildColorPalettes();
   downloadBtn.disabled = false;
   history = [];
   undoBtn.disabled = true;
   setStatus(`Loaded ${filename}. Found ${loadedSvg.querySelectorAll(shapeSelector).length} drawable shapes.`);
 }
 
+function autoUniteSpeckles() {
+  if (!loadedSvg) return 0;
+  const minArea = Number(speckleAreaEl.value) || 0;
+  const items = getShapeItems();
+  let mergedCount = 0;
+
+  for (const item of items) {
+    if (!item.el.isConnected || item.area <= 0 || item.area > minArea || !item.fill) continue;
+    const container = findContainerOfColor(items, item, item.fill);
+    if (!container) continue;
+
+    const mergedAsPath =
+      item.el.tagName.toLowerCase() === 'path' &&
+      container.el.tagName.toLowerCase() === 'path' &&
+      mergePathIntoContainer(item.el, container.el);
+
+    if (!mergedAsPath && item.el.isConnected) {
+      item.el.remove();
+    }
+    mergedCount += 1;
+  }
+
+  if (mergedCount > 0) rebuildColorPalettes();
+  return mergedCount;
+}
+
 function downloadUpdatedSvg() {
   if (!loadedSvg) return setStatus('Load an SVG first.');
+  const merged = autoUniteSpeckles();
   const markup = new XMLSerializer().serializeToString(loadedSvg);
   const blob = new Blob([markup], { type: 'image/svg+xml;charset=utf-8' });
   const url = URL.createObjectURL(blob);
@@ -144,7 +244,7 @@ function downloadUpdatedSvg() {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
-  setStatus(`Downloaded ${outputName}.`);
+  setStatus(`Downloaded ${outputName}.${merged > 0 ? ` Auto-united ${merged} speckle(s).` : ''}`);
 }
 
 function handleFile(file) {
@@ -183,11 +283,12 @@ function getGlobalBBox(el) {
   ];
   const xs = corners.map((p) => p.x);
   const ys = corners.map((p) => p.y);
-  const minX = Math.min(...xs);
-  const maxX = Math.max(...xs);
-  const minY = Math.min(...ys);
-  const maxY = Math.max(...ys);
-  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+  return {
+    x: Math.min(...xs),
+    y: Math.min(...ys),
+    width: Math.max(...xs) - Math.min(...xs),
+    height: Math.max(...ys) - Math.min(...ys)
+  };
 }
 
 function circleIntersectsBox(center, radius, box) {
@@ -227,9 +328,7 @@ function findContainerOfColor(items, innerItem, targetColor) {
 
 function screenToSvgPoint(clientX, clientY) {
   const rect = loadedSvg.getBoundingClientRect();
-  const x = (clientX - rect.left) / zoom;
-  const y = (clientY - rect.top) / zoom;
-  return { x, y };
+  return { x: (clientX - rect.left) / zoom, y: (clientY - rect.top) / zoom };
 }
 
 function updateBrushPreviewSize() {
@@ -252,43 +351,22 @@ function performBrushPass(clientX, clientY) {
   const sourceColor = normalizeColor(speckleColorEl.value);
   const targetColor = normalizeColor(mergeColorEl.value);
   const pointer = screenToSvgPoint(clientX, clientY);
-
-  const items = [...loadedSvg.querySelectorAll(shapeSelector)].map((el) => {
-    try {
-      const box = getGlobalBBox(el);
-      return {
-        el,
-        box,
-        area: box.width * box.height,
-        fill: getComputedFill(el),
-        geometry: el instanceof SVGGeometryElement ? el : null
-      };
-    } catch {
-      return null;
-    }
-  }).filter(Boolean);
+  const items = getShapeItems();
 
   const touched = items.filter((item) => {
     if (item.area <= 0 || item.area > minArea) return false;
-    if (item.fill !== sourceColor) return false;
-    return circleIntersectsBox(pointer, brushRadius, item.box);
+    if (!circleIntersectsBox(pointer, brushRadius, item.box)) return false;
+    return speckleColorMode === 'all' ? Boolean(item.fill) : item.fill === sourceColor;
   });
 
   let changed = 0;
   for (const item of touched) {
-    const container = findContainerOfColor(items, item, targetColor);
-    const merged =
-      item.el.tagName.toLowerCase() === 'path' &&
-      container?.el?.tagName?.toLowerCase() === 'path' &&
-      mergePathIntoContainer(item.el, container.el);
-
-    if (!merged) {
-      item.el.setAttribute('fill', mergeColorEl.value);
-    }
+    item.el.setAttribute('fill', mergeColorEl.value);
     changed += 1;
   }
 
   if (changed > 0) {
+    rebuildColorPalettes();
     setStatus(`Magic eraser updated ${changed} speckle(s).`);
   }
 }
@@ -297,50 +375,46 @@ function flattenBackground() {
   if (!loadedSvg) return setStatus('Load an SVG first.');
   pushHistory();
 
-  const edgeColor = normalizeColor(mergeColorEl.value);
-  const all = [...loadedSvg.querySelectorAll(shapeSelector)].map((el) => {
-    try {
-      return { el, box: getGlobalBBox(el), fill: getComputedFill(el) };
-    } catch {
-      return null;
-    }
-  }).filter(Boolean);
-
+  const all = getShapeItems();
   const svgBox = loadedSvg.getBBox();
-  const touchingEdge = (box) => {
-    const eps = 0.5;
-    return (
-      box.x <= svgBox.x + eps ||
-      box.y <= svgBox.y + eps ||
-      box.x + box.width >= svgBox.x + svgBox.width - eps ||
-      box.y + box.height >= svgBox.y + svgBox.height - eps
-    );
-  };
+  const eps = 0.75;
+  const touchingEdge = (box) => (
+    box.x <= svgBox.x + eps ||
+    box.y <= svgBox.y + eps ||
+    box.x + box.width >= svgBox.x + svgBox.width - eps ||
+    box.y + box.height >= svgBox.y + svgBox.height - eps
+  );
 
-  const candidates = all.filter((item) => item.fill === edgeColor && touchingEdge(item.box));
-  if (candidates.length === 0) {
-    setStatus('No edge-contact shapes found for selected merge color.');
+  const edgeItems = all.filter((item) => item.fill && touchingEdge(item.box));
+  if (edgeItems.length === 0) {
+    setStatus('No edge-contact shapes found for flattening.');
     return;
   }
 
+  const counts = new Map();
+  edgeItems.forEach((item) => counts.set(item.fill, (counts.get(item.fill) || 0) + 1));
+  const dominantFill = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+  const candidates = edgeItems.filter((item) => item.fill === dominantFill);
+
   const dParts = [];
   candidates.forEach((item) => {
-    const tag = item.el.tagName.toLowerCase();
-    if (tag === 'path' && item.el.getAttribute('d')) {
+    if (item.el.tagName.toLowerCase() === 'path' && item.el.getAttribute('d')) {
       dParts.push(item.el.getAttribute('d'));
     }
     item.el.remove();
   });
 
   const background = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-  if (dParts.length > 0) {
-    background.setAttribute('d', dParts.join(' '));
-  } else {
-    background.setAttribute('d', `M${svgBox.x} ${svgBox.y} H${svgBox.x + svgBox.width} V${svgBox.y + svgBox.height} H${svgBox.x} Z`);
-  }
-  background.setAttribute('fill', mergeColorEl.value);
+  background.setAttribute(
+    'd',
+    dParts.length > 0
+      ? dParts.join(' ')
+      : `M${svgBox.x} ${svgBox.y} H${svgBox.x + svgBox.width} V${svgBox.y + svgBox.height} H${svgBox.x} Z`
+  );
+  background.setAttribute('fill', rgbToHex(dominantFill));
   loadedSvg.prepend(background);
-  setStatus(`Flattened background from ${candidates.length} edge-contact shape(s).`);
+  rebuildColorPalettes();
+  setStatus(`Flattened background with ${candidates.length} edge-contact shape(s).`);
 }
 
 ['dragenter', 'dragover'].forEach((eventName) => {
@@ -360,9 +434,31 @@ function flattenBackground() {
 dropZone.addEventListener('drop', (event) => handleFile(event.dataTransfer?.files?.[0]));
 fileInput.addEventListener('change', () => handleFile(fileInput.files?.[0]));
 
+allColorsBtn.addEventListener('click', () => {
+  speckleColorMode = 'all';
+  allColorsBtn.classList.add('active');
+  [...specklePaletteEl.querySelectorAll('.color-swatch')].forEach((sw) => sw.classList.remove('active'));
+});
+
+speckleColorEl.addEventListener('input', () => {
+  speckleColorMode = 'single';
+  allColorsBtn.classList.remove('active');
+  selectSwatch(specklePaletteEl, normalizeColor(speckleColorEl.value));
+});
+
+mergeColorEl.addEventListener('input', () => {
+  selectSwatch(mergePaletteEl, normalizeColor(mergeColorEl.value));
+});
+
 downloadBtn.addEventListener('click', downloadUpdatedSvg);
 undoBtn.addEventListener('click', undoStep);
 flattenBgBtn.addEventListener('click', flattenBackground);
+togglePinkBgBtn.addEventListener('click', () => {
+  canvasWrap.classList.toggle('hot-pink-preview');
+  setStatus(canvasWrap.classList.contains('hot-pink-preview')
+    ? 'Hot pink preview background enabled (saved SVG is unchanged).'
+    : 'Hot pink preview background disabled.');
+});
 
 zoomInBtn.addEventListener('click', () => {
   zoom = clampZoom(zoom * 1.2);
@@ -385,18 +481,20 @@ canvasWrap.addEventListener('wheel', (event) => {
 }, { passive: false });
 
 document.addEventListener('keydown', (event) => {
-  if (event.code === 'Space') {
-    isSpaceHeld = true;
-    canvasWrap.classList.add('space-pan');
-  }
+  if (event.code !== 'Space') return;
+  const activeTag = document.activeElement?.tagName?.toLowerCase();
+  if (activeTag === 'input' || activeTag === 'textarea' || document.activeElement?.isContentEditable) return;
+  event.preventDefault();
+  isSpaceHeld = true;
+  canvasWrap.classList.add('space-pan');
 });
 
 document.addEventListener('keyup', (event) => {
-  if (event.code === 'Space') {
-    isSpaceHeld = false;
-    isPanning = false;
-    canvasWrap.classList.remove('space-pan', 'panning');
-  }
+  if (event.code !== 'Space') return;
+  event.preventDefault();
+  isSpaceHeld = false;
+  isPanning = false;
+  canvasWrap.classList.remove('space-pan', 'panning');
 });
 
 canvasWrap.addEventListener('mousedown', (event) => {

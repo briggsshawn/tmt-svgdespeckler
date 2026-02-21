@@ -18,22 +18,27 @@
 
       <div class="group">
         <label for="speckleArea">Speckle max area (px²)</label>
-        <input id="speckleArea" type="number" min="0" value="70" step="1" />
+        <input id="speckleArea" type="number" min="0" value="8" step="1" />
       </div>
 
       <div class="group">
         <label for="speckleColor">Speckle color to remove</label>
-        <input id="speckleColor" type="color" value="#000000" />
+        <div id="specklePalette" class="color-palette"></div>
+        <div class="row compact-row">
+          <button id="allColorsBtn" type="button" class="all-colors-btn">All colors</button>
+          <input id="speckleColor" type="color" value="#000000" />
+        </div>
       </div>
 
       <div class="group">
         <label for="mergeColor">Merge/unite with color</label>
+        <div id="mergePalette" class="color-palette"></div>
         <input id="mergeColor" type="color" value="#ffffff" />
       </div>
 
       <div class="group">
         <label for="brushSize">Brush size (px)</label>
-        <input id="brushSize" type="number" min="1" value="36" step="1" />
+        <input id="brushSize" type="number" min="1" value="10" step="1" />
       </div>
 
       <div class="group row">
@@ -43,6 +48,10 @@
 
       <div class="group">
         <button id="flattenBgBtn">Flatten Background</button>
+      </div>
+
+      <div class="group">
+        <button id="togglePinkBgBtn" type="button">Toggle hot pink preview background</button>
       </div>
 
       <div class="group">
