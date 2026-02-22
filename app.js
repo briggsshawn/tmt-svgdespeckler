@@ -242,6 +242,49 @@ function circleIntersectsBox(center, radius, box) {
   return dx * dx + dy * dy <= radius * radius;
 }
 
+function buildBrushSamplePoints(center, radius) {
+  if (radius <= 0) return [center];
+  const points = [center];
+  const rings = [0.5, 1];
+  const steps = 12;
+
+  rings.forEach((ring) => {
+    const ringRadius = radius * ring;
+    for (let i = 0; i < steps; i += 1) {
+      const angle = (Math.PI * 2 * i) / steps;
+      points.push({
+        x: center.x + Math.cos(angle) * ringRadius,
+        y: center.y + Math.sin(angle) * ringRadius
+      });
+    }
+  });
+
+  return points;
+}
+
+function elementIntersectsBrush(item, center, radius) {
+  if (!circleIntersectsBox(center, radius, item.box)) return false;
+
+  const geometry = item.el;
+  if (!(geometry instanceof SVGGeometryElement)) return true;
+
+  const ctm = geometry.getCTM();
+  if (!ctm) return true;
+
+  let inverse;
+  try {
+    inverse = ctm.inverse();
+  } catch {
+    return true;
+  }
+
+  const samplePoints = buildBrushSamplePoints(center, radius);
+  return samplePoints.some((sample) => {
+    const localPoint = new DOMPoint(sample.x, sample.y).matrixTransform(inverse);
+    return geometry.isPointInFill(localPoint) || geometry.isPointInStroke(localPoint);
+  });
+}
+
 function applyBrush(clientX, clientY) {
   if (!loadedSvg) return;
   const brushRadius = Number(brushSizeEl.value);
@@ -257,7 +300,7 @@ function applyBrush(clientX, clientY) {
   let changed = 0;
   items.forEach((item) => {
     if (item.area > maxArea) return;
-    if (!circleIntersectsBox(pointer, brushRadius, item.box)) return;
+    if (!elementIntersectsBrush(item, pointer, brushRadius)) return;
     if (!item.fillHex) return;
     if (sourceColorMode === 'single' && item.fillHex !== selectedSourceColor) return;
     if (item.fillHex === targetColor) return;
@@ -266,7 +309,6 @@ function applyBrush(clientX, clientY) {
   });
 
   if (changed > 0) {
-    mergeSameColorShapes([targetColor]);
     cleanupOpenStrokeArtifacts();
     buildPalette();
     setStatus(`Magic fix recolored ${changed} speckle(s) to ${targetColor}.`);
@@ -356,6 +398,17 @@ function cleanupOpenStrokeArtifacts(maxArea = Number(speckleAreaEl.value) * 4) {
     const fillHex = toHexColor(getFill(el));
     const stroke = getStroke(el);
     if (fillHex || !stroke) return;
+
+    if (tag === 'path') {
+      const d = (el.getAttribute('d') || '').trim();
+      const isClosed = /z\s*$/i.test(d);
+      if (!isClosed) {
+        el.remove();
+        removed += 1;
+        return;
+      }
+    }
+
     const box = el.getBBox();
     const area = box.width * box.height;
     if (Number.isFinite(area) && area <= areaLimit) {
