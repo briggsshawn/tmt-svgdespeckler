@@ -335,13 +335,16 @@ function findContainingTarget(speckleItem, items) {
   const mergeColor = selectedMergeColor || pickMergeColorForSpeckle(speckleItem, items);
   if (!mergeColor) return null;
 
-  const point = new DOMPoint(speckleItem.center.x, speckleItem.center.y);
+  const { x, y } = speckleItem.center;
 
   const candidates = items
     .filter((item) => item.el !== speckleItem.el)
     .filter((item) => item.area > speckleItem.area)
     .filter((item) => item.fill && sameColor(item.fill, mergeColor))
-    .filter((item) => item.geometry && item.geometry.isPointInFill(point))
+    .filter((item) => {
+      const b = item.box;
+      return x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height;
+    })
     .sort((a, b) => a.area - b.area);
 
   return candidates[0] || null;
