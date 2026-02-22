@@ -9,7 +9,7 @@
   <body>
     <aside class="panel">
       <h1>SVG Speckle Remaker</h1>
-      <p class="hint">Drop an SVG, brush over noisy speckles, and remap them into a selected color.</p>
+      <p class="hint">Drop an SVG, choose a working color, then brush to erase touched interior speckles/artifacts of any color.</p>
 
       <section class="group">
         <label for="fileInput">Load SVG</label>
@@ -22,18 +22,23 @@
       </section>
 
       <section class="group">
-        <label>Speckle source color</label>
-        <div class="row">
-          <button id="allColorsBtn" type="button" class="toggle active">All</button>
-          <div id="sourcePalette" class="palette"></div>
-        </div>
+        <label for="canvasBgColor">Canvas background</label>
+        <input id="canvasBgColor" type="color" value="#0a0b0f" />
       </section>
 
       <section class="group">
-        <label>Replacement color</label>
+        <label>Working Color - (Remove speckles from)</label>
         <div class="row stack">
           <input id="replaceColor" type="color" value="#111111" />
           <div id="targetPalette" class="palette"></div>
+          <label class="checkRow">
+            <input id="deleteAllMatching" type="checkbox" />
+            <span>Delete all matching with brush</span>
+          </label>
+          <label class="checkRow">
+            <input id="fillAndMerge" type="checkbox" />
+            <span>Fill and Merge - do not delete</span>
+          </label>
         </div>
       </section>
 
@@ -43,7 +48,8 @@
       </section>
 
       <section class="group row">
-        <button id="modeBrushBtn" class="active">Brush Fix</button>
+        <button id="modeBrushBtn" class="active">Brush Erase</button>
+        <button id="modeOpenPathBtn">Open Path Del</button>
         <button id="modePanBtn">Pan</button>
       </section>
 
@@ -53,7 +59,7 @@
       </section>
 
       <section class="group row">
-        <button id="mergeBtn">Merge/Unite Same Colors</button>
+        <button id="mergeBtn">Merge/Unite Working Color</button>
         <button id="undoBtn" disabled>Undo</button>
       </section>
 

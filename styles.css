@@ -54,10 +54,17 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 
 .row { display: flex; gap: .45rem; align-items: center; }
 .stack { flex-direction: column; align-items: stretch; }
-
-.toggle {
-  width: 54px;
-  flex: 0 0 auto;
+.checkRow {
+  display: flex;
+  align-items: center;
+  gap: .45rem;
+  font-size: .83rem;
+}
+.checkRow input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
 }
 
 .palette {
