@@ -35,6 +35,7 @@ let panStart = { x: 0, y: 0, scrollLeft: 0, scrollTop: 0 };
 let history = [];
 let pageDragDepth = 0;
 let renderMode = 'fill';
+let brushPaperScope = null;
 
 function setStatus(message) {
   statusEl.textContent = message;
@@ -308,6 +309,102 @@ function pickMergeColorForSpeckle(speckle, items) {
   return candidates[0]?.fill || null;
 }
 
+function getBrushPaperScope() {
+  if (brushPaperScope) return brushPaperScope;
+  brushPaperScope = new paper.PaperScope();
+  brushPaperScope.setup(document.createElement('canvas'));
+  brushPaperScope.view.autoUpdate = false;
+  return brushPaperScope;
+}
+
+function findContainingTarget(speckleItem, items) {
+  const mergeColor = selectedMergeColor || pickMergeColorForSpeckle(speckleItem, items);
+  if (!mergeColor) return null;
+
+  const point = new DOMPoint(speckleItem.center.x, speckleItem.center.y);
+  const candidates = items
+    .filter((item) => item.el !== speckleItem.el)
+    .filter((item) => item.area > speckleItem.area)
+    .filter((item) => item.fill === mergeColor)
+    .filter((item) => item.geometry && item.geometry.isPointInFill(point))
+    .sort((a, b) => a.area - b.area);
+
+  return candidates[0] || null;
+}
+
+function transferContainerMetadata(sourceEl, targetEl) {
+  [...sourceEl.attributes].forEach((attr) => {
+    if (attr.name === 'd') return;
+    targetEl.setAttribute(attr.name, attr.value);
+  });
+
+  targetEl.setAttribute('fill', rgbToHex(selectedMergeColor || getComputedFill(sourceEl) || '#000000'));
+  targetEl.removeAttribute('stroke');
+  targetEl.removeAttribute('stroke-width');
+
+  if (sourceEl.dataset.renderOriginalFill !== undefined) {
+    targetEl.dataset.renderOriginalFill = rgbToHex(selectedMergeColor || getComputedFill(sourceEl) || '#000000');
+  }
+  if (sourceEl.dataset.renderOriginalStroke !== undefined) {
+    targetEl.dataset.renderOriginalStroke = '';
+  }
+  if (sourceEl.dataset.renderOriginalStrokeWidth !== undefined) {
+    targetEl.dataset.renderOriginalStrokeWidth = '';
+  }
+}
+
+function subtractSpeckleFromTarget(containerEl, speckleEl) {
+  const scope = getBrushPaperScope();
+  scope.project.clear();
+
+  const containerItem = scope.project.importSVG(containerEl.cloneNode(true), { expandShapes: true });
+  const speckleItem = scope.project.importSVG(speckleEl.cloneNode(true), { expandShapes: true });
+  if (!containerItem || !speckleItem) return false;
+
+  const flattenToPaths = (rootItem) => [
+    ...rootItem.getItems({ class: scope.Path }),
+    ...rootItem.getItems({ class: scope.CompoundPath })
+  ];
+
+  const containerPaths = flattenToPaths(containerItem).filter((item) => item.visible && !item.guide);
+  const specklePaths = flattenToPaths(speckleItem).filter((item) => item.visible && !item.guide);
+  if (containerPaths.length === 0 || specklePaths.length === 0) return false;
+
+  const combine = (paths, mode) => {
+    const stack = paths.slice();
+    while (stack.length > 1) {
+      const a = stack.pop();
+      const b = stack.pop();
+      const result = mode === 'unite' ? a.unite(b) : a.subtract(b);
+      if (a.isInserted()) a.remove();
+      if (b.isInserted()) b.remove();
+      stack.push(result);
+    }
+    return stack[0] || null;
+  };
+
+  const containerPath = combine(containerPaths, 'unite');
+  const specklePath = combine(specklePaths, 'unite');
+  if (!containerPath || !specklePath) return false;
+
+  containerPath.fillColor = new scope.Color('black');
+  containerPath.strokeColor = null;
+  specklePath.fillColor = new scope.Color('black');
+  specklePath.strokeColor = null;
+
+  const subtracted = containerPath.subtract(specklePath);
+  if (!subtracted) return false;
+
+  const exportedNode = subtracted.exportSVG({ asString: false });
+  if (!(exportedNode instanceof SVGElement)) return false;
+
+  transferContainerMetadata(containerEl, exportedNode);
+  containerEl.replaceWith(exportedNode);
+  if (speckleEl.isConnected) speckleEl.remove();
+  scope.project.clear();
+  return true;
+}
+
 function performBrushPass(clientX, clientY) {
   if (!loadedSvg) return;
 
@@ -330,17 +427,16 @@ function performBrushPass(clientX, clientY) {
 
   touched.forEach((speckle) => {
     if (!speckle.el.isConnected || !speckle.fill) return;
-    const mergeColor = pickMergeColorForSpeckle(speckle, items);
-    if (!mergeColor || mergeColor === speckle.fill) return;
-    applyFill(speckle, mergeColor);
-    changed += 1;
+    const target = findContainingTarget(speckle, items);
+    if (!target?.el?.isConnected) return;
+    if (subtractSpeckleFromTarget(target.el, speckle.el)) changed += 1;
   });
 
   if (changed === 0) return;
   pushHistorySnapshot(before);
   applyRenderMode();
   rebuildColorPalettes();
-  setStatus(`Merged ${changed} speckle(s) into ${rgbToHex(selectedMergeColor || '#000000')}.`);
+  setStatus(`Cut out ${changed} speckle(s) from ${rgbToHex(selectedMergeColor || '#000000')}.`);
 }
 
 function getEdgeTouchingItems(items, targetFill = null) {
@@ -412,210 +508,6 @@ function removeBackgroundColor() {
   setStatus(`Removed ${removed} shape(s) using edge color ${rgbToHex(dominantFill)}.`);
 }
 
-function unionSameColorPathsForExport(originalSvg) {
-  const SVG_NS = 'http://www.w3.org/2000/svg';
-  const exportSvg = originalSvg.cloneNode(true);
-
-  // ---- 1) Restore true fills/strokes if user is in "Thin Stroke" preview mode ----
-  // Your preview mode stores originals in dataset.* then overwrites attributes.
-  // We always export using the ORIGINAL fills/strokes, regardless of current view mode.
-  const shapeSelector = 'path,rect,circle,ellipse,polygon,polyline,line';
-
-  [...exportSvg.querySelectorAll(shapeSelector)].forEach((el) => {
-    const of = el.dataset?.renderOriginalFill;
-    const os = el.dataset?.renderOriginalStroke;
-    const osw = el.dataset?.renderOriginalStrokeWidth;
-
-    if (of !== undefined) {
-      if (of) el.setAttribute('fill', of);
-      else el.removeAttribute('fill');
-      delete el.dataset.renderOriginalFill;
-    }
-    if (os !== undefined) {
-      if (os) el.setAttribute('stroke', os);
-      else el.removeAttribute('stroke');
-      delete el.dataset.renderOriginalStroke;
-    }
-    if (osw !== undefined) {
-      if (osw) el.setAttribute('stroke-width', osw);
-      else el.removeAttribute('stroke-width');
-      delete el.dataset.renderOriginalStrokeWidth;
-    }
-    el.removeAttribute('vector-effect');
-  });
-
-  // ---- 2) Inline computed fill/stroke so Paper sees it (handles CSS/class fills) ----
-  // Note: Paper import can miss computed styles. We bake them in.
-  function normalizeColor(color) {
-    if (!color) return null;
-    const t = String(color).trim().toLowerCase();
-    if (t === 'none' || t === 'transparent') return null;
-    return t.replace(/\s+/g, '');
-  }
-
-  [...exportSvg.querySelectorAll(shapeSelector)].forEach((el) => {
-    const cs = el.ownerSVGElement ? getComputedStyle(el) : null;
-    if (!cs) return;
-
-    const fillAttr = normalizeColor(el.getAttribute('fill'));
-    const strokeAttr = normalizeColor(el.getAttribute('stroke'));
-
-    // If fill missing but computed fill exists, set it.
-    if (!fillAttr) {
-      const cf = normalizeColor(cs.fill);
-      if (cf) el.setAttribute('fill', cf);
-    }
-    // If stroke missing but computed stroke exists, set it.
-    if (!strokeAttr) {
-      const csStroke = normalizeColor(cs.stroke);
-      if (csStroke) el.setAttribute('stroke', csStroke);
-    }
-  });
-
-  // ---- 3) Separate filled vs stroke-only elements (we only union filled geometry) ----
-  const allEls = [...exportSvg.querySelectorAll(shapeSelector)];
-  const filledEls = [];
-  const strokeOnlyClones = [];
-
-  allEls.forEach((el) => {
-    const fill = normalizeColor(el.getAttribute('fill'));
-    const stroke = normalizeColor(el.getAttribute('stroke'));
-    const hasFill = !!fill;
-    const hasStroke = !!stroke;
-
-    if (hasFill) {
-      filledEls.push(el);
-    } else if (hasStroke) {
-      // Preserve strokes exactly (Paper union can distort stroke-only linework)
-      strokeOnlyClones.push(el.cloneNode(true));
-    }
-  });
-
-  // If nothing has fill, bail gracefully (still preserve viewport + strokes)
-  const outSvg = document.createElementNS(SVG_NS, 'svg');
-  outSvg.setAttribute('xmlns', SVG_NS);
-
-  const viewBox = originalSvg.getAttribute('viewBox');
-  if (viewBox) outSvg.setAttribute('viewBox', viewBox);
-  const width = originalSvg.getAttribute('width');
-  const height = originalSvg.getAttribute('height');
-  if (width) outSvg.setAttribute('width', width);
-  if (height) outSvg.setAttribute('height', height);
-
-  if (filledEls.length === 0) {
-    strokeOnlyClones.forEach((n) => outSvg.appendChild(n));
-    return outSvg;
-  }
-
-  // ---- 4) Build a "fills-only" SVG for Paper to import ----
-  const fillsOnlySvg = document.createElementNS(SVG_NS, 'svg');
-  fillsOnlySvg.setAttribute('xmlns', SVG_NS);
-  if (viewBox) fillsOnlySvg.setAttribute('viewBox', viewBox);
-  if (width) fillsOnlySvg.setAttribute('width', width);
-  if (height) fillsOnlySvg.setAttribute('height', height);
-  filledEls.forEach((el) => fillsOnlySvg.appendChild(el.cloneNode(true)));
-
-  // ---- 5) Paper union per fill color (exclude background-like shapes) ----
-  const scope = new paper.PaperScope();
-  const canvas = document.createElement('canvas');
-  scope.setup(canvas);
-  scope.view.autoUpdate = false;
-
-  const imported = scope.project.importSVG(fillsOnlySvg, { expandShapes: true });
-
-  const items = [
-    ...imported.getItems({ class: scope.Path }),
-    ...imported.getItems({ class: scope.CompoundPath })
-  ].filter((it) => it.visible && !it.guide && it.fillColor);
-
-  const bounds = imported.bounds;
-  const EDGE_EPS = 1.5;
-  const BACKGROUND_AREA_RATIO = 0.55; // consider "background" if it covers >55% of bbox
-
-  function isEdgeTouching(it) {
-    const b = it.bounds;
-    return (
-      b.left <= bounds.left + EDGE_EPS ||
-      b.top <= bounds.top + EDGE_EPS ||
-      b.right >= bounds.right - EDGE_EPS ||
-      b.bottom >= bounds.bottom - EDGE_EPS
-    );
-  }
-
-  function areaApprox(it) {
-    // some items can have weird/0 area; use bounds area
-    const a = (typeof it.area === 'number' && isFinite(it.area)) ? Math.abs(it.area) : 0;
-    if (a > 0) return a;
-    return it.bounds.width * it.bounds.height;
-  }
-
-  // group by fill
-  const byFill = new Map();
-  items.forEach((it) => {
-    const key = it.fillColor.toCSS(true);
-    if (!byFill.has(key)) byFill.set(key, []);
-    byFill.get(key).push(it);
-  });
-
-  // balanced union to avoid lockups
-  function balancedUnion(list) {
-    const stack = list.slice();
-    while (stack.length > 1) {
-      const a = stack.pop();
-      const b = stack.pop();
-      const u = a.unite(b);
-      // remove originals (unite returns a new item)
-      if (a.isInserted()) a.remove();
-      if (b.isInserted()) b.remove();
-      stack.push(u);
-    }
-    return stack[0] || null;
-  }
-
-  const unioned = [];
-
-  byFill.forEach((group) => {
-    if (!group || group.length === 0) return;
-
-    // split background-like shapes OUT of union
-    const bg = [];
-    const work = [];
-
-    const totalArea = bounds.width * bounds.height;
-
-    group.forEach((it) => {
-      const big = areaApprox(it) >= totalArea * BACKGROUND_AREA_RATIO;
-      if (big && isEdgeTouching(it)) bg.push(it);
-      else work.push(it);
-    });
-
-    // union working shapes
-    if (work.length === 1) {
-      unioned.push(work[0]);
-    } else if (work.length > 1) {
-      const u = balancedUnion(work);
-      if (u) unioned.push(u);
-    }
-
-    // keep background shapes untouched
-    bg.forEach((it) => unioned.push(it));
-  });
-
-  // ---- 6) Export unioned fills back into final SVG + re-add stroke-only elements ----
-  unioned.forEach((it) => {
-    if (!it || !it.fillColor) return;
-    const node = it.exportSVG({ asString: false });
-    outSvg.appendChild(node);
-  });
-
-  strokeOnlyClones.forEach((n) => outSvg.appendChild(n));
-
-  scope.project.clear();
-  scope.remove();
-
-  return outSvg;
-}
-
 function downloadUpdatedSvg() {
   if (!loadedSvg) {
     setStatus('Load an SVG first.');
@@ -623,7 +515,32 @@ function downloadUpdatedSvg() {
   }
 
   try {
-    const resultSvg = unionSameColorPathsForExport(loadedSvg.cloneNode(true));
+    const resultSvg = loadedSvg.cloneNode(true);
+
+    if (renderMode === 'stroke') {
+      [...resultSvg.querySelectorAll(shapeSelector)].forEach((shape) => {
+        const originalFill = shape.dataset.renderOriginalFill;
+        const originalStroke = shape.dataset.renderOriginalStroke;
+        const originalStrokeWidth = shape.dataset.renderOriginalStrokeWidth;
+
+        if (originalFill !== undefined) {
+          if (originalFill) shape.setAttribute('fill', originalFill);
+          else shape.removeAttribute('fill');
+          delete shape.dataset.renderOriginalFill;
+        }
+        if (originalStroke !== undefined) {
+          if (originalStroke) shape.setAttribute('stroke', originalStroke);
+          else shape.removeAttribute('stroke');
+          delete shape.dataset.renderOriginalStroke;
+        }
+        if (originalStrokeWidth !== undefined) {
+          if (originalStrokeWidth) shape.setAttribute('stroke-width', originalStrokeWidth);
+          else shape.removeAttribute('stroke-width');
+          delete shape.dataset.renderOriginalStrokeWidth;
+        }
+        shape.removeAttribute('vector-effect');
+      });
+    }
 
     if (!resultSvg || !resultSvg.querySelector('*')) {
       setStatus('Export failed: no geometry returned.');
