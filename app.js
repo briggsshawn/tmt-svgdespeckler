@@ -78,6 +78,28 @@ function snapshot() {
   return new XMLSerializer().serializeToString(loadedSvg);
 }
 
+function parseSvgLength(value) {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.endsWith('%')) return null;
+  const parsed = Number.parseFloat(trimmed);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return parsed;
+}
+
+function ensureSvgViewportSize(svg) {
+  const explicitWidth = parseSvgLength(svg.getAttribute('width'));
+  const explicitHeight = parseSvgLength(svg.getAttribute('height'));
+  if (explicitWidth && explicitHeight) return;
+
+  const viewBox = svg.viewBox?.baseVal;
+  if (!viewBox || !Number.isFinite(viewBox.width) || !Number.isFinite(viewBox.height)) return;
+  if (viewBox.width <= 0 || viewBox.height <= 0) return;
+
+  if (!explicitWidth) svg.setAttribute('width', String(viewBox.width));
+  if (!explicitHeight) svg.setAttribute('height', String(viewBox.height));
+}
+
 function pushHistory(markup) {
   if (!markup) return;
   history.push(markup);
@@ -302,6 +324,7 @@ function undo() {
   if (!svg) return;
   loadedSvg = document.importNode(svg, true);
   loadedSvg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  ensureSvgViewportSize(loadedSvg);
   svgStage.innerHTML = '';
   svgStage.appendChild(loadedSvg);
   undoBtn.disabled = history.length === 0;
@@ -334,6 +357,7 @@ function loadSvgText(text, filename = 'uploaded.svg') {
   }
   loadedSvg = document.importNode(svg, true);
   loadedSvg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  ensureSvgViewportSize(loadedSvg);
   svgStage.innerHTML = '';
   svgStage.appendChild(loadedSvg);
   loadedFilename = filename.toLowerCase().endsWith('.svg') ? filename : `${filename}.svg`;
