@@ -242,6 +242,10 @@ function circleIntersectsBox(center, radius, box) {
   return dx * dx + dy * dy <= radius * radius;
 }
 
+function boxesOverlap(a, b) {
+  return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
+}
+
 function buildBrushSamplePoints(center, radius) {
   if (radius <= 0) return [center];
   const points = [center];
@@ -337,63 +341,97 @@ function mergeSameColorShapes(colors = null) {
   let mergedCount = 0;
 
   palette.forEach((fill) => {
-    const nodes = [...loadedSvg.querySelectorAll(mergeSelector)].filter((el) => toHexColor(getFill(el)) === fill);
-    if (nodes.length < 2) return;
-
-    const scope = new paper.PaperScope();
-    const canvas = document.createElement('canvas');
-    scope.setup(canvas);
-
-    const imported = nodes
-      .map((node) => {
-        const clone = node.cloneNode(true);
-        clone.removeAttribute('id');
-        return scope.project.importSVG(clone);
-      })
-      .filter(Boolean)
-      .map((item) => {
-        if (item instanceof scope.CompoundPath || item instanceof scope.Path) return item;
-        if (item.children?.length) {
-          const child = item.children.find((c) => c instanceof scope.Path || c instanceof scope.CompoundPath);
-          return child || null;
+    const nodes = [...loadedSvg.querySelectorAll(mergeSelector)]
+      .filter((el) => toHexColor(getFill(el)) === fill)
+      .map((el) => {
+        try {
+          return { el, box: el.getBBox() };
+        } catch {
+          return null;
         }
-        return null;
       })
       .filter(Boolean);
+    if (nodes.length < 2) return;
 
-    if (imported.length < 2) {
-      scope.remove();
-      return;
-    }
-
-    let united = imported[0];
-    for (let i = 1; i < imported.length; i += 1) {
-      try {
-        united = united.unite(imported[i]);
-      } catch {
-        // continue with next pair; bad geometry can fail boolean ops.
+    const visited = new Set();
+    const groups = [];
+    for (let i = 0; i < nodes.length; i += 1) {
+      if (visited.has(i)) continue;
+      const group = [nodes[i]];
+      visited.add(i);
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (let j = 0; j < nodes.length; j += 1) {
+          if (visited.has(j)) continue;
+          if (group.some((entry) => boxesOverlap(entry.box, nodes[j].box))) {
+            group.push(nodes[j]);
+            visited.add(j);
+            changed = true;
+          }
+        }
       }
+      if (group.length > 1) groups.push(group.map((entry) => entry.el));
     }
 
-    if (!united || !united.exportSVG) {
+    if (groups.length === 0) return;
+
+    groups.forEach((groupNodes) => {
+      const scope = new paper.PaperScope();
+      const canvas = document.createElement('canvas');
+      scope.setup(canvas);
+
+      const imported = groupNodes
+        .map((node) => {
+          const clone = node.cloneNode(true);
+          clone.removeAttribute('id');
+          return scope.project.importSVG(clone);
+        })
+        .filter(Boolean)
+        .map((item) => {
+          if (item instanceof scope.CompoundPath || item instanceof scope.Path) return item;
+          if (item.children?.length) {
+            const child = item.children.find((c) => c instanceof scope.Path || c instanceof scope.CompoundPath);
+            return child || null;
+          }
+          return null;
+        })
+        .filter(Boolean);
+
+      if (imported.length < 2) {
+        scope.remove();
+        return;
+      }
+
+      let united = imported[0];
+      for (let i = 1; i < imported.length; i += 1) {
+        try {
+          united = united.unite(imported[i]);
+        } catch {
+          // continue with next pair; bad geometry can fail boolean ops.
+        }
+      }
+
+      if (!united || !united.exportSVG) {
+        scope.remove();
+        return;
+      }
+
+      const exported = united.exportSVG({ asString: false });
+      if (!exported) {
+        scope.remove();
+        return;
+      }
+
+      groupNodes.forEach((node) => node.remove());
+      exported.removeAttribute('stroke');
+      exported.removeAttribute('stroke-width');
+      exported.removeAttribute('stroke-opacity');
+      setElementFill(exported, fill);
+      loadedSvg.appendChild(exported);
+      mergedCount += Math.max(0, groupNodes.length - 1);
       scope.remove();
-      return;
-    }
-
-    const exported = united.exportSVG({ asString: false });
-    if (!exported) {
-      scope.remove();
-      return;
-    }
-
-    nodes.forEach((node) => node.remove());
-    exported.removeAttribute('stroke');
-    exported.removeAttribute('stroke-width');
-    exported.removeAttribute('stroke-opacity');
-    setElementFill(exported, fill);
-    loadedSvg.appendChild(exported);
-    mergedCount += Math.max(0, nodes.length - 1);
-    scope.remove();
+    });
   });
 
   return mergedCount;
