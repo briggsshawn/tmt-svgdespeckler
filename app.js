@@ -36,6 +36,7 @@ let history = [];
 let pageDragDepth = 0;
 let renderMode = 'fill';
 let brushPaperScope = null;
+let brushSession = null;
 
 function setStatus(message) {
   statusEl.textContent = message;
@@ -378,6 +379,21 @@ function transferContainerMetadata(sourceEl, targetEl) {
   }
 }
 
+function transferShapeMetadata(sourceEl, targetEl, fillColor = null) {
+  [...sourceEl.attributes].forEach((attr) => {
+    if (attr.name === 'd') return;
+    targetEl.setAttribute(attr.name, attr.value);
+  });
+
+  if (fillColor) {
+    const hexFill = rgbToHex(fillColor);
+    targetEl.setAttribute('fill', hexFill);
+    if (sourceEl.dataset.renderOriginalFill !== undefined) {
+      targetEl.dataset.renderOriginalFill = hexFill;
+    }
+  }
+}
+
 function subtractSpeckleFromTarget(containerEl, speckleEl) {
   const scope = getBrushPaperScope();
   scope.project.clear();
@@ -425,13 +441,131 @@ function subtractSpeckleFromTarget(containerEl, speckleEl) {
 
   transferContainerMetadata(containerEl, exportedNode);
   containerEl.replaceWith(exportedNode);
-  if (speckleEl.isConnected) speckleEl.remove();
   scope.project.clear();
   return true;
 }
 
+function flattenToUnifiedPath(item, scope) {
+  const paths = [
+    ...item.getItems({ class: scope.Path }),
+    ...item.getItems({ class: scope.CompoundPath })
+  ].filter((child) => child.visible && !child.guide);
+
+  if (paths.length === 0) return null;
+  const stack = paths.slice();
+  while (stack.length > 1) {
+    const a = stack.pop();
+    const b = stack.pop();
+    const unified = a.unite(b);
+    if (a.isInserted()) a.remove();
+    if (b.isInserted()) b.remove();
+    stack.push(unified);
+  }
+
+  return stack[0] || null;
+}
+
+function uniteColorFamily(fillColor) {
+  if (!fillColor || !loadedSvg) return 0;
+  const items = getShapeItems().filter((item) => sameColor(item.fill, fillColor) && item.el.isConnected);
+  if (items.length < 2) return 0;
+
+  const scope = getBrushPaperScope();
+  scope.project.clear();
+
+  const imported = items
+    .map((item) => {
+      const importedItem = scope.project.importSVG(item.el.cloneNode(true), { expandShapes: true });
+      const path = importedItem ? flattenToUnifiedPath(importedItem, scope) : null;
+      if (!path) return null;
+      path.fillColor = new scope.Color('black');
+      path.strokeColor = null;
+      return { original: item.el, path };
+    })
+    .filter(Boolean);
+
+  if (imported.length < 2) {
+    scope.project.clear();
+    return 0;
+  }
+
+  const clusters = [];
+  imported.forEach((entry) => {
+    let merged = false;
+    for (let i = 0; i < clusters.length; i += 1) {
+      const cluster = clusters[i];
+      if (!cluster.path.bounds.intersects(entry.path.bounds)) continue;
+      const combined = cluster.path.unite(entry.path);
+      if (!combined) continue;
+      if (cluster.path.isInserted()) cluster.path.remove();
+      if (entry.path.isInserted()) entry.path.remove();
+      cluster.path = combined;
+      cluster.sources.push(entry.original);
+      merged = true;
+      break;
+    }
+    if (!merged) {
+      clusters.push({ path: entry.path, sources: [entry.original] });
+    }
+  });
+
+  let changed = 0;
+  clusters.forEach((cluster) => {
+    if (cluster.sources.length < 2) return;
+
+    const anchor = cluster.sources[0];
+    const exported = cluster.path.exportSVG({ asString: false });
+    if (!(exported instanceof SVGElement)) return;
+
+    transferShapeMetadata(anchor, exported, fillColor);
+    cluster.sources.forEach((source) => {
+      if (source !== anchor && source.isConnected) source.remove();
+    });
+    if (anchor.isConnected) {
+      anchor.replaceWith(exported);
+      changed += 1;
+    }
+  });
+
+  scope.project.clear();
+  return changed;
+}
+
+function beginBrushSession() {
+  if (!loadedSvg || brushSession) return;
+  brushSession = {
+    before: snapshotSvg(),
+    cutCount: 0,
+    recolorCount: 0,
+    colorsToUnite: new Set()
+  };
+}
+
+function finishBrushSession() {
+  if (!brushSession) return;
+
+  let unionCount = 0;
+  [...brushSession.colorsToUnite].forEach((color) => {
+    unionCount += uniteColorFamily(color);
+  });
+
+  const totalChanges = brushSession.cutCount + brushSession.recolorCount + unionCount;
+  if (totalChanges > 0) {
+    pushHistorySnapshot(brushSession.before);
+    applyRenderMode();
+    rebuildColorPalettes();
+    const mergeHex = rgbToHex(selectedMergeColor || '#000000');
+    setStatus(
+      `Cut ${brushSession.cutCount} speckle(s), recolored ${brushSession.recolorCount}, and united ${unionCount} path cluster(s) to ${mergeHex}.`
+    );
+  }
+
+  brushSession = null;
+}
+
 function performBrushPass(clientX, clientY) {
   if (!loadedSvg) return;
+  if (!brushSession) beginBrushSession();
 
   const maxArea = Number(speckleAreaEl.value) || 0;
   const brushRadius = Number(brushSizeEl.value) || 1;
@@ -449,21 +583,23 @@ function performBrushPass(clientX, clientY) {
 
   if (touched.length === 0) return;
 
-  const before = snapshotSvg();
-  let changed = 0;
-
   touched.forEach((speckle) => {
     if (!speckle.el.isConnected || !speckle.fill) return;
     const target = findContainingTarget(speckle, items);
     if (!target?.el?.isConnected) return;
-    if (subtractSpeckleFromTarget(target.el, speckle.el)) changed += 1;
-  });
+    if (!subtractSpeckleFromTarget(target.el, speckle.el)) return;
 
-  if (changed === 0) return;
-  pushHistorySnapshot(before);
-  applyRenderMode();
-  rebuildColorPalettes();
-  setStatus(`Cut out ${changed} speckle(s) from ${rgbToHex(selectedMergeColor || '#000000')}.`);
+    brushSession.cutCount += 1;
+
+    if (selectedMergeColor) {
+      applyFill(speckle, selectedMergeColor);
+      brushSession.recolorCount += 1;
+      brushSession.colorsToUnite.add(selectedMergeColor);
+    }
+
+    const targetFill = selectedMergeColor || target.fill;
+    if (targetFill) brushSession.colorsToUnite.add(targetFill);
+  });
 }
 
 function getEdgeTouchingItems(items, targetFill = null) {
@@ -774,6 +910,7 @@ canvasWrap.addEventListener('mousedown', (event) => {
   }
 
   isDrawing = true;
+  beginBrushSession();
   updateBrushPreviewPosition(event);
   brushPreview.style.display = 'block';
   performBrushPass(event.clientX, event.clientY);
@@ -805,12 +942,14 @@ canvasWrap.addEventListener('mouseup', () => {
   isDrawing = false;
   isPanning = false;
   canvasWrap.classList.remove('panning');
+  finishBrushSession();
 });
 
 document.addEventListener('mouseup', () => {
   isDrawing = false;
   isPanning = false;
   canvasWrap.classList.remove('panning');
+  finishBrushSession();
 });
 
 document.addEventListener('dragenter', (event) => {
