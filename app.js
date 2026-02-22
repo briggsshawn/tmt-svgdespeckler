@@ -245,11 +245,12 @@ function circleIntersectsBox(center, radius, box) {
 function buildBrushSamplePoints(center, radius) {
   if (radius <= 0) return [center];
   const points = [center];
-  const rings = [0.5, 1];
-  const steps = 12;
+  const ringCount = Math.max(2, Math.min(6, Math.ceil(radius / 6) + 1));
 
-  rings.forEach((ring) => {
+  for (let ringIndex = 1; ringIndex <= ringCount; ringIndex += 1) {
+    const ring = ringIndex / ringCount;
     const ringRadius = radius * ring;
+    const steps = Math.max(16, Math.ceil(2 * Math.PI * ringRadius));
     for (let i = 0; i < steps; i += 1) {
       const angle = (Math.PI * 2 * i) / steps;
       points.push({
@@ -257,9 +258,22 @@ function buildBrushSamplePoints(center, radius) {
         y: center.y + Math.sin(angle) * ringRadius
       });
     }
-  });
+  }
 
   return points;
+}
+
+function buildElementProbePoints(item) {
+  const { box } = item;
+  const halfW = box.width / 2;
+  const halfH = box.height / 2;
+  return [
+    { x: box.x + halfW, y: box.y + halfH },
+    { x: box.x, y: box.y },
+    { x: box.x + box.width, y: box.y },
+    { x: box.x, y: box.y + box.height },
+    { x: box.x + box.width, y: box.y + box.height }
+  ];
 }
 
 function elementIntersectsBrush(item, center, radius) {
@@ -278,8 +292,9 @@ function elementIntersectsBrush(item, center, radius) {
     return true;
   }
 
-  const samplePoints = buildBrushSamplePoints(center, radius);
+  const samplePoints = [...buildBrushSamplePoints(center, radius), ...buildElementProbePoints(item)];
   return samplePoints.some((sample) => {
+    if ((sample.x - center.x) ** 2 + (sample.y - center.y) ** 2 > radius * radius) return false;
     const localPoint = new DOMPoint(sample.x, sample.y).matrixTransform(inverse);
     return geometry.isPointInFill(localPoint) || geometry.isPointInStroke(localPoint);
   });
