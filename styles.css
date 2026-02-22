@@ -112,6 +112,18 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   max-width: none;
 }
 
+#svgStage svg.preview-strokes path,
+#svgStage svg.preview-strokes rect,
+#svgStage svg.preview-strokes circle,
+#svgStage svg.preview-strokes ellipse,
+#svgStage svg.preview-strokes polygon,
+#svgStage svg.preview-strokes polyline,
+#svgStage svg.preview-strokes line {
+  fill: none !important;
+  stroke: #4f8cff !important;
+  stroke-width: 0.5pt !important;
+}
+
 #brushPreview {
   position: absolute;
   width: 24px;

@@ -12,6 +12,8 @@ const allColorsBtn = document.getElementById('allColorsBtn');
 const brushSizeEl = document.getElementById('brushSize');
 const modeBrushBtn = document.getElementById('modeBrushBtn');
 const modePanBtn = document.getElementById('modePanBtn');
+const viewFillsBtn = document.getElementById('viewFillsBtn');
+const viewStrokesBtn = document.getElementById('viewStrokesBtn');
 const mergeBtn = document.getElementById('mergeBtn');
 const undoBtn = document.getElementById('undoBtn');
 const downloadBtn = document.getElementById('downloadBtn');
@@ -33,6 +35,7 @@ let isPanning = false;
 let sourceColorMode = 'all';
 let selectedSourceColor = null;
 let selectedTargetColor = '#111111';
+let viewMode = 'fills';
 let panStart = { x: 0, y: 0, scrollLeft: 0, scrollTop: 0 };
 let history = [];
 
@@ -68,9 +71,21 @@ function toHexColor(rawColor) {
 function getFill(el) {
   const direct = normalizeColor(el.getAttribute('fill'));
   if (direct) return direct;
-  if (!loadedSvg) return null;
-  const computed = normalizeColor(getComputedStyle(el).fill);
-  return computed;
+  const inline = normalizeColor(el.style.fill);
+  return inline;
+}
+
+function getStroke(el) {
+  const direct = normalizeColor(el.getAttribute('stroke'));
+  if (direct) return direct;
+  return normalizeColor(el.style.stroke);
+}
+
+function setElementFill(el, color) {
+  el.setAttribute('fill', color);
+  el.style.fill = color;
+  el.style.fillOpacity = '1';
+  el.removeAttribute('fill-opacity');
 }
 
 function snapshot() {
@@ -160,7 +175,17 @@ function buildPalette() {
   });
 
   renderSwatchSelection(sourcePaletteEl, selectedSourceColor);
+  if (sourceColorMode === 'all') {
+    [...sourcePaletteEl.querySelectorAll('.swatch')].forEach((swatch) => swatch.classList.remove('active'));
+  }
   renderSwatchSelection(targetPaletteEl, selectedTargetColor);
+}
+
+function applyViewMode() {
+  if (!loadedSvg) return;
+  loadedSvg.classList.toggle('preview-strokes', viewMode === 'strokes');
+  viewFillsBtn.classList.toggle('active', viewMode === 'fills');
+  viewStrokesBtn.classList.toggle('active', viewMode === 'strokes');
 }
 
 function renderPalette(container, colors, onClick) {
@@ -236,12 +261,13 @@ function applyBrush(clientX, clientY) {
     if (!item.fillHex) return;
     if (sourceColorMode === 'single' && item.fillHex !== selectedSourceColor) return;
     if (item.fillHex === targetColor) return;
-    item.el.setAttribute('fill', targetColor);
+    setElementFill(item.el, targetColor);
     changed += 1;
   });
 
   if (changed > 0) {
     mergeSameColorShapes([targetColor]);
+    cleanupOpenStrokeArtifacts();
     buildPalette();
     setStatus(`Magic fix recolored ${changed} speckle(s) to ${targetColor}.`);
   }
@@ -250,10 +276,11 @@ function applyBrush(clientX, clientY) {
 function mergeSameColorShapes(colors = null) {
   if (!loadedSvg) return 0;
   const palette = colors || [...new Set(getShapeItems().map((i) => i.fillHex).filter(Boolean))];
+  const mergeSelector = 'path,rect,circle,ellipse,polygon';
   let mergedCount = 0;
 
   palette.forEach((fill) => {
-    const nodes = [...loadedSvg.querySelectorAll(shapeSelector)].filter((el) => toHexColor(getFill(el)) === fill);
+    const nodes = [...loadedSvg.querySelectorAll(mergeSelector)].filter((el) => toHexColor(getFill(el)) === fill);
     if (nodes.length < 2) return;
 
     const scope = new paper.PaperScope();
@@ -303,13 +330,40 @@ function mergeSameColorShapes(colors = null) {
     }
 
     nodes.forEach((node) => node.remove());
-    exported.setAttribute('fill', fill);
+    exported.removeAttribute('stroke');
+    exported.removeAttribute('stroke-width');
+    exported.removeAttribute('stroke-opacity');
+    setElementFill(exported, fill);
     loadedSvg.appendChild(exported);
     mergedCount += Math.max(0, nodes.length - 1);
     scope.remove();
   });
 
   return mergedCount;
+}
+
+function cleanupOpenStrokeArtifacts(maxArea = Number(speckleAreaEl.value) * 4) {
+  if (!loadedSvg) return 0;
+  const areaLimit = Number.isFinite(maxArea) && maxArea > 0 ? maxArea : 2000;
+  let removed = 0;
+  [...loadedSvg.querySelectorAll(shapeSelector)].forEach((el) => {
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'line' || tag === 'polyline') {
+      el.remove();
+      removed += 1;
+      return;
+    }
+    const fillHex = toHexColor(getFill(el));
+    const stroke = getStroke(el);
+    if (fillHex || !stroke) return;
+    const box = el.getBBox();
+    const area = box.width * box.height;
+    if (Number.isFinite(area) && area <= areaLimit) {
+      el.remove();
+      removed += 1;
+    }
+  });
+  return removed;
 }
 
 function undo() {
@@ -329,6 +383,7 @@ function undo() {
   svgStage.appendChild(loadedSvg);
   undoBtn.disabled = history.length === 0;
   buildPalette();
+  applyViewMode();
   setStatus(`Undo complete. Remaining steps: ${history.length}.`);
 }
 
@@ -362,9 +417,12 @@ function loadSvgText(text, filename = 'uploaded.svg') {
   svgStage.appendChild(loadedSvg);
   loadedFilename = filename.toLowerCase().endsWith('.svg') ? filename : `${filename}.svg`;
   history = [];
+  sourceColorMode = 'all';
+  allColorsBtn.classList.add('active');
   undoBtn.disabled = true;
   downloadBtn.disabled = false;
   buildPalette();
+  applyViewMode();
   applyZoom();
   setStatus(`Loaded ${loadedFilename}. Brush to magic-fix selected areas.`);
 }
@@ -477,6 +535,14 @@ brushSizeEl.addEventListener('input', applyZoom);
 fileInput.addEventListener('change', () => handleFile(fileInput.files?.[0]));
 modeBrushBtn.addEventListener('click', () => setMode('brush'));
 modePanBtn.addEventListener('click', () => setMode('pan'));
+viewFillsBtn.addEventListener('click', () => {
+  viewMode = 'fills';
+  applyViewMode();
+});
+viewStrokesBtn.addEventListener('click', () => {
+  viewMode = 'strokes';
+  applyViewMode();
+});
 undoBtn.addEventListener('click', undo);
 downloadBtn.addEventListener('click', downloadSvg);
 
@@ -484,8 +550,9 @@ mergeBtn.addEventListener('click', () => {
   if (!loadedSvg) return;
   pushHistory(snapshot());
   const merged = mergeSameColorShapes();
+  const removed = cleanupOpenStrokeArtifacts();
   buildPalette();
-  setStatus(`Merge complete. United ${merged} shape overlap(s) across matching colors.`);
+  setStatus(`Merge complete. United ${merged} overlap(s) and removed ${removed} open stroke artifact(s).`);
 });
 
 zoomInBtn.addEventListener('click', () => {
