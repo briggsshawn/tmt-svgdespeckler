@@ -63,6 +63,20 @@ function normalizeColor(color) {
   return t.replace(/\s+/g, '');
 }
 
+function toHexColor(color) {
+  const c = normalizeColor(color);
+  if (!c) return null;
+  if (c.startsWith('#')) return rgbToHex(hexToRgb(c));
+  if (c.startsWith('rgb')) return rgbToHex(c);
+  return null;
+}
+
+function sameColor(a, b) {
+  const ha = toHexColor(a);
+  const hb = toHexColor(b);
+  return !!ha && !!hb && ha === hb;
+}
+
 function getComputedFill(el) {
   const originalFill = normalizeColor(el.dataset.renderOriginalFill || '');
   if (originalFill) return originalFill;
@@ -322,10 +336,11 @@ function findContainingTarget(speckleItem, items) {
   if (!mergeColor) return null;
 
   const point = new DOMPoint(speckleItem.center.x, speckleItem.center.y);
+
   const candidates = items
     .filter((item) => item.el !== speckleItem.el)
     .filter((item) => item.area > speckleItem.area)
-    .filter((item) => item.fill === mergeColor)
+    .filter((item) => item.fill && sameColor(item.fill, mergeColor))
     .filter((item) => item.geometry && item.geometry.isPointInFill(point))
     .sort((a, b) => a.area - b.area);
 
@@ -408,16 +423,18 @@ function subtractSpeckleFromTarget(containerEl, speckleEl) {
 function performBrushPass(clientX, clientY) {
   if (!loadedSvg) return;
 
-  const minArea = Number(speckleAreaEl.value) || 0;
+  const maxArea = Number(speckleAreaEl.value) || 0;
   const brushRadius = Number(brushSizeEl.value) || 1;
   const sourceColor = selectedSpeckleColor;
   const pointer = screenToSvgPoint(clientX, clientY);
 
   const items = getShapeItems();
   const touched = items.filter((item) => {
-    if (item.area > minArea) return false;
+    if (item.area > maxArea) return false;
     if (!circleIntersectsBox(pointer, brushRadius, item.box)) return false;
-    return speckleColorMode === 'all' ? Boolean(item.fill) : item.fill === sourceColor;
+    return speckleColorMode === 'all'
+      ? Boolean(item.fill)
+      : (item.fill && sameColor(item.fill, sourceColor));
   });
 
   if (touched.length === 0) return;
