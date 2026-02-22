@@ -308,6 +308,13 @@ function screenToSvgPoint(clientX, clientY) {
   return { x: svgPoint.x, y: svgPoint.y };
 }
 
+function svgToScreenPoint(svgX, svgY) {
+  const ctm = loadedSvg?.getScreenCTM();
+  if (!ctm) return null;
+  const pt = new DOMPoint(svgX, svgY).matrixTransform(ctm);
+  return { x: pt.x, y: pt.y };
+}
+
 function applyFill(item, fill) {
   item.el.setAttribute('fill', rgbToHex(fill));
   if (item.el.dataset.renderOriginalFill !== undefined) {
@@ -338,24 +345,27 @@ function getBrushPaperScope() {
 }
 
 function findContainingTarget(speckleItem, items) {
-  const { x, y } = speckleItem.center;
+  const itemByEl = new Map(items.map((item) => [item.el, item]));
+  const screenPoint = svgToScreenPoint(speckleItem.center.x, speckleItem.center.y);
+  if (!screenPoint) return null;
 
-  const candidates = items
-    .filter((item) => item.el !== speckleItem.el)
-    .filter((item) => item.area > speckleItem.area)
-    .filter((item) => item.fill) // must have fill
-    .filter((item) => {
-      const b = item.box;
-      return (
-        x >= b.x &&
-        x <= b.x + b.width &&
-        y >= b.y &&
-        y <= b.y + b.height
-      );
-    })
-    .sort((a, b) => a.area - b.area);
+  const stack = document.elementsFromPoint(screenPoint.x, screenPoint.y);
+  for (let i = 0; i < stack.length; i += 1) {
+    const candidateEl = stack[i];
+    if (!(candidateEl instanceof SVGElement)) continue;
+    if (!candidateEl.matches(shapeSelector)) continue;
+    if (candidateEl === speckleItem.el) continue;
+    if (!loadedSvg.contains(candidateEl)) continue;
 
-  return candidates[0] || null;
+    const candidate = itemByEl.get(candidateEl);
+    if (!candidate || !candidate.fill || candidate.area <= speckleItem.area) continue;
+    if (candidate.geometry && !candidate.geometry.isPointInFill(new DOMPoint(speckleItem.center.x, speckleItem.center.y))) {
+      continue;
+    }
+    return candidate;
+  }
+
+  return null;
 }
 
 function transferContainerMetadata(sourceEl, targetEl) {
@@ -569,16 +579,13 @@ function performBrushPass(clientX, clientY) {
 
   const maxArea = Number(speckleAreaEl.value) || 0;
   const brushRadius = Number(brushSizeEl.value) || 1;
-  const sourceColor = selectedSpeckleColor;
   const pointer = screenToSvgPoint(clientX, clientY);
 
   const items = getShapeItems();
   const touched = items.filter((item) => {
     if (item.area > maxArea) return false;
     if (!circleIntersectsBox(pointer, brushRadius, item.box)) return false;
-    return speckleColorMode === 'all'
-      ? Boolean(item.fill)
-      : (item.fill && sameColor(item.fill, sourceColor));
+    return Boolean(item.fill);
   });
 
   if (touched.length === 0) return;
@@ -678,6 +685,7 @@ function downloadUpdatedSvg() {
   }
 
   try {
+    finishBrushSession();
     const resultSvg = loadedSvg.cloneNode(true);
 
     if (renderMode === 'stroke') {
