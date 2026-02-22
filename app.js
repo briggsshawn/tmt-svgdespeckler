@@ -189,15 +189,67 @@ function getShapeItems() {
     .filter((item) => item && item.area > 0 && Number.isFinite(item.area));
 }
 
+function getDominantFillHex() {
+  const items = getShapeItems().filter((i) => i.fillHex);
+  if (!items.length) return null;
+  const totals = new Map();
+  for (const it of items) totals.set(it.fillHex, (totals.get(it.fillHex) || 0) + it.area);
+  let best = null;
+  let bestScore = -Infinity;
+  for (const [fill, score] of totals.entries()) {
+    if (score > bestScore) {
+      bestScore = score;
+      best = fill;
+    }
+  }
+  return best;
+}
+
+function getBackgroundFillHex() {
+  // Heuristic: background/counter color is usually the most common fill by total area OR near-white.
+  // We’ll treat the DOMINANT fill as background IF it is very light; otherwise treat the most dominant as "primary ink"
+  // and background as the lightest fill present.
+  const items = getShapeItems().filter((i) => i.fillHex);
+  if (!items.length) return null;
+
+  const fills = [...new Set(items.map((i) => i.fillHex))];
+  const dominant = getDominantFillHex();
+
+  // pick lightest fill as background candidate
+  const lum = (hex) => {
+    const h = hex.replace('#', '');
+    const r = parseInt(h.slice(0, 2), 16);
+    const g = parseInt(h.slice(2, 4), 16);
+    const b = parseInt(h.slice(4, 6), 16);
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  let lightest = fills[0];
+  let bestLum = -Infinity;
+  for (const f of fills) {
+    const L = lum(f);
+    if (L > bestLum) {
+      bestLum = L;
+      lightest = f;
+    }
+  }
+
+  // If there is an obviously light background, use it.
+  if (bestLum >= 220) return lightest;
+
+  // Otherwise assume no explicit background fill; return null.
+  return null;
+}
+
 function buildPalette() {
   if (!loadedSvg) return;
   const unique = [...new Set(getShapeItems().map((i) => i.fillHex).filter(Boolean))].sort();
+  const dominant = getDominantFillHex() || unique[0] || null;
 
   if (!selectedSourceColor || !unique.includes(selectedSourceColor)) {
-    selectedSourceColor = unique[0] || null;
+    selectedSourceColor = dominant;
   }
-  if (!selectedTargetColor || !unique.includes(selectedTargetColor)) {
-    selectedTargetColor = unique[0] || '#111111';
+  if (!selectedTargetColor || !unique.includes(selectedTargetColor) || selectedTargetColor === '#111111') {
+    selectedTargetColor = dominant || '#111111';
   }
   replaceColorEl.value = selectedTargetColor;
 
@@ -355,6 +407,7 @@ function applyBrush(clientX, clientY) {
 
   const pointer = screenToSvg(clientX, clientY);
   const items = getShapeItems();
+  const bgFill = getBackgroundFillHex();
 
   let changed = 0;
   items.forEach((item) => {
@@ -365,6 +418,11 @@ function applyBrush(clientX, clientY) {
     if (!elementIntersectsBrush(item, pointer, brushRadius)) return;
     if (!item.fillHex) return;
     if (sourceColorMode === 'single' && item.fillHex !== selectedSourceColor) return;
+    if (sourceColorMode === 'all' && bgFill && item.fillHex === bgFill) return;
+    const userChoseSource = sourceColorMode === 'single';
+    if (sourceColorMode === 'all' && !userChoseSource) {
+      if (item.area > maxArea) return;
+    }
     if (item.fillHex === targetColor) return;
     setElementFill(item.el, targetColor);
     changed += 1;
@@ -579,8 +637,8 @@ function loadSvgText(text, filename = 'uploaded.svg') {
   svgStage.appendChild(loadedSvg);
   loadedFilename = filename.toLowerCase().endsWith('.svg') ? filename : `${filename}.svg`;
   history = [];
-  sourceColorMode = 'all';
-  allColorsBtn.classList.add('active');
+  sourceColorMode = 'single';
+  allColorsBtn.classList.remove('active');
   undoBtn.disabled = true;
   downloadBtn.disabled = false;
   buildPalette();
