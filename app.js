@@ -5,929 +5,385 @@ const brushPreview = document.getElementById('brushPreview');
 const dropOverlay = document.getElementById('dropOverlay');
 const statusEl = document.getElementById('status');
 const speckleAreaEl = document.getElementById('speckleArea');
-const specklePaletteEl = document.getElementById('specklePalette');
-const mergePaletteEl = document.getElementById('mergePalette');
+const sourcePaletteEl = document.getElementById('sourcePalette');
+const targetPaletteEl = document.getElementById('targetPalette');
+const replaceColorEl = document.getElementById('replaceColor');
 const allColorsBtn = document.getElementById('allColorsBtn');
 const brushSizeEl = document.getElementById('brushSize');
-const flattenBgBtn = document.getElementById('flattenBgBtn');
-const removeBgBtn = document.getElementById('removeBgBtn');
-const togglePinkBgBtn = document.getElementById('togglePinkBgBtn');
-const toggleRenderModeBtn = document.getElementById('toggleRenderModeBtn');
+const modeBrushBtn = document.getElementById('modeBrushBtn');
+const modePanBtn = document.getElementById('modePanBtn');
+const mergeBtn = document.getElementById('mergeBtn');
 const undoBtn = document.getElementById('undoBtn');
 const downloadBtn = document.getElementById('downloadBtn');
-const zoomInBtn = document.getElementById('zoomIn');
-const zoomOutBtn = document.getElementById('zoomOut');
-const zoomResetBtn = document.getElementById('zoomReset');
+const zoomOutBtn = document.getElementById('zoomOutBtn');
+const zoomInBtn = document.getElementById('zoomInBtn');
+const zoomResetBtn = document.getElementById('zoomResetBtn');
 
 const shapeSelector = 'path,rect,circle,ellipse,polygon,polyline,line';
-const MAX_HISTORY = 30;
+const MAX_HISTORY = 25;
 
-let zoom = 1;
 let loadedSvg = null;
 let loadedFilename = 'updated.svg';
+let zoom = 1;
 let isDrawing = false;
+let pageDragDepth = 0;
+let mode = 'brush';
 let isSpaceHeld = false;
 let isPanning = false;
-let speckleColorMode = 'single';
-let selectedSpeckleColor = null;
-let selectedMergeColor = null;
+let sourceColorMode = 'all';
+let selectedSourceColor = null;
+let selectedTargetColor = '#111111';
 let panStart = { x: 0, y: 0, scrollLeft: 0, scrollTop: 0 };
 let history = [];
-let pageDragDepth = 0;
-let renderMode = 'fill';
-let brushPaperScope = null;
-let brushSession = null;
 
 function setStatus(message) {
   statusEl.textContent = message;
 }
 
-function hexToRgb(hex) {
-  const v = hex.replace('#', '');
-  const full = v.length === 3 ? [...v].map((c) => c + c).join('') : v;
-  const int = Number.parseInt(full, 16);
-  return `rgb(${(int >> 16) & 255}, ${(int >> 8) & 255}, ${int & 255})`;
+function normalizeColor(raw) {
+  if (!raw) return null;
+  const c = raw.trim().toLowerCase();
+  if (!c || c === 'none' || c === 'transparent') return null;
+  return c;
 }
 
 function rgbToHex(rgb) {
   const m = rgb.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
-  if (!m) return '#000000';
+  if (!m) return rgb;
   const [r, g, b] = [m[1], m[2], m[3]].map((n) => Number(n).toString(16).padStart(2, '0'));
   return `#${r}${g}${b}`;
 }
 
-function normalizeColor(color) {
-  if (!color) return null;
-  const t = color.trim().toLowerCase();
-  if (t === 'none' || t === 'transparent') return null;
-  if (t.startsWith('#')) return hexToRgb(t);
-  return t.replace(/\s+/g, '');
-}
-
-function toHexColor(color) {
-  const c = normalizeColor(color);
+function toHexColor(rawColor) {
+  const c = normalizeColor(rawColor);
   if (!c) return null;
-  if (c.startsWith('#')) return rgbToHex(hexToRgb(c));
+  if (c.startsWith('#')) {
+    if (c.length === 4) return `#${c[1]}${c[1]}${c[2]}${c[2]}${c[3]}${c[3]}`;
+    return c;
+  }
   if (c.startsWith('rgb')) return rgbToHex(c);
   return null;
 }
 
-function sameColor(a, b) {
-  const ha = toHexColor(a);
-  const hb = toHexColor(b);
-  return !!ha && !!hb && ha === hb;
-}
-
-function getComputedFill(el) {
-  const originalFill = normalizeColor(el.dataset.renderOriginalFill || '');
-  if (originalFill) return originalFill;
+function getFill(el) {
   const direct = normalizeColor(el.getAttribute('fill'));
   if (direct) return direct;
-  const styleFill = normalizeColor(el.style.fill || '');
-  if (styleFill) return styleFill;
-  if (!el.ownerSVGElement) return null;
-  return normalizeColor(getComputedStyle(el).fill);
+  if (!loadedSvg) return null;
+  const computed = normalizeColor(getComputedStyle(el).fill);
+  return computed;
 }
 
-function snapshotSvg() {
+function snapshot() {
   if (!loadedSvg) return null;
   return new XMLSerializer().serializeToString(loadedSvg);
 }
 
-function pushHistorySnapshot(markup) {
+function pushHistory(markup) {
   if (!markup) return;
   history.push(markup);
-  if (history.length > MAX_HISTORY) {
-    history = history.slice(-MAX_HISTORY);
-  }
+  if (history.length > MAX_HISTORY) history = history.slice(-MAX_HISTORY);
   undoBtn.disabled = history.length === 0;
-}
-
-function captureHistory() {
-  pushHistorySnapshot(snapshotSvg());
-}
-
-function restoreFromMarkup(markup) {
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(markup, 'image/svg+xml');
-  const svg = doc.querySelector('svg');
-  if (!svg) return false;
-  loadedSvg = document.importNode(svg, true);
-  loadedSvg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
-  svgStage.innerHTML = '';
-  svgStage.appendChild(loadedSvg);
-  applyRenderMode();
-  rebuildColorPalettes();
-  return true;
-}
-
-function undoStep() {
-  const last = history.pop();
-  if (!last) {
-    setStatus('Nothing to undo.');
-    undoBtn.disabled = true;
-    return;
-  }
-
-  const ok = restoreFromMarkup(last);
-  undoBtn.disabled = history.length === 0;
-  setStatus(ok ? `Undo complete. Remaining undo steps: ${history.length}.` : 'Undo failed due to parse error.');
-}
-
-function toGlobalPoint(el, x, y) {
-  const matrix = el.getCTM();
-  if (!matrix) return { x, y };
-  const p = new DOMPoint(x, y).matrixTransform(matrix);
-  return { x: p.x, y: p.y };
-}
-
-function getGlobalBBox(el) {
-  const box = el.getBBox();
-  const corners = [
-    toGlobalPoint(el, box.x, box.y),
-    toGlobalPoint(el, box.x + box.width, box.y),
-    toGlobalPoint(el, box.x, box.y + box.height),
-    toGlobalPoint(el, box.x + box.width, box.y + box.height)
-  ];
-  const xs = corners.map((p) => p.x);
-  const ys = corners.map((p) => p.y);
-  return {
-    x: Math.min(...xs),
-    y: Math.min(...ys),
-    width: Math.max(...xs) - Math.min(...xs),
-    height: Math.max(...ys) - Math.min(...ys)
-  };
 }
 
 function getShapeItems() {
   if (!loadedSvg) return [];
   return [...loadedSvg.querySelectorAll(shapeSelector)]
     .map((el) => {
-      const box = getGlobalBBox(el);
+      const box = el.getBBox();
+      const ctm = el.getCTM();
+      if (!ctm) return null;
+      const p1 = new DOMPoint(box.x, box.y).matrixTransform(ctm);
+      const p2 = new DOMPoint(box.x + box.width, box.y + box.height).matrixTransform(ctm);
+      const bbox = {
+        x: Math.min(p1.x, p2.x),
+        y: Math.min(p1.y, p2.y),
+        width: Math.abs(p2.x - p1.x),
+        height: Math.abs(p2.y - p1.y)
+      };
+      const fill = getFill(el);
       return {
         el,
-        box,
-        area: box.width * box.height,
-        fill: getComputedFill(el),
-        geometry: el instanceof SVGGeometryElement ? el : null,
-        center: { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+        fill,
+        fillHex: toHexColor(fill),
+        area: bbox.width * bbox.height,
+        box: bbox
       };
     })
-    .filter((item) => Number.isFinite(item.area) && item.area > 0);
+    .filter((item) => item && item.area > 0 && Number.isFinite(item.area));
 }
 
-function getSvgPaletteColors() {
-  const unique = new Set();
-  getShapeItems().forEach((item) => {
-    if (item.fill) unique.add(item.fill);
+function buildPalette() {
+  if (!loadedSvg) return;
+  const unique = [...new Set(getShapeItems().map((i) => i.fillHex).filter(Boolean))].sort();
+
+  if (!selectedSourceColor || !unique.includes(selectedSourceColor)) {
+    selectedSourceColor = unique[0] || null;
+  }
+  if (!selectedTargetColor || !unique.includes(selectedTargetColor)) {
+    selectedTargetColor = unique[0] || '#111111';
+  }
+  replaceColorEl.value = selectedTargetColor;
+
+  renderPalette(sourcePaletteEl, unique, (color) => {
+    sourceColorMode = 'single';
+    allColorsBtn.classList.remove('active');
+    selectedSourceColor = color;
+    renderSwatchSelection(sourcePaletteEl, color);
   });
-  return [...unique].sort();
-}
 
-function selectSwatch(paletteEl, color) {
-  [...paletteEl.querySelectorAll('.color-swatch')].forEach((btn) => {
-    btn.classList.toggle('active', btn.dataset.color === color);
+  renderPalette(targetPaletteEl, unique, (color) => {
+    selectedTargetColor = color;
+    replaceColorEl.value = color;
+    renderSwatchSelection(targetPaletteEl, color);
   });
+
+  renderSwatchSelection(sourcePaletteEl, selectedSourceColor);
+  renderSwatchSelection(targetPaletteEl, selectedTargetColor);
 }
 
-function renderPalette(paletteEl, colors, onPick) {
-  paletteEl.innerHTML = '';
+function renderPalette(container, colors, onClick) {
+  container.innerHTML = '';
   colors.forEach((color) => {
     const swatch = document.createElement('button');
+    swatch.className = 'swatch';
     swatch.type = 'button';
-    swatch.className = 'color-swatch';
-    swatch.title = `${rgbToHex(color)} / ${color}`;
     swatch.style.background = color;
     swatch.dataset.color = color;
-    swatch.addEventListener('click', () => onPick(color));
-    paletteEl.appendChild(swatch);
+    swatch.title = color;
+    swatch.addEventListener('click', () => onClick(color));
+    container.appendChild(swatch);
   });
 }
 
-function rebuildColorPalettes() {
-  const colors = getSvgPaletteColors();
-
-  if (colors.length === 0) {
-    selectedSpeckleColor = null;
-    selectedMergeColor = null;
-  } else {
-    if (!selectedSpeckleColor || !colors.includes(selectedSpeckleColor)) {
-      selectedSpeckleColor = colors[0];
-    }
-    if (!selectedMergeColor || !colors.includes(selectedMergeColor)) {
-      selectedMergeColor = colors[0];
-    }
-  }
-
-  renderPalette(specklePaletteEl, colors, (color) => {
-    speckleColorMode = 'single';
-    allColorsBtn.classList.remove('active');
-    selectedSpeckleColor = color;
-    selectSwatch(specklePaletteEl, color);
-  });
-
-  renderPalette(mergePaletteEl, colors, (color) => {
-    selectedMergeColor = color;
-    selectSwatch(mergePaletteEl, color);
-  });
-
-  selectSwatch(specklePaletteEl, selectedSpeckleColor);
-  selectSwatch(mergePaletteEl, selectedMergeColor);
-}
-
-function loadSvgText(text, filename = 'SVG') {
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(text, 'image/svg+xml');
-  const svg = doc.querySelector('svg');
-  if (!svg || doc.querySelector('parsererror')) {
-    setStatus('Unable to parse SVG.');
-    return;
-  }
-
-  loadedSvg = document.importNode(svg, true);
-  loadedSvg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
-  loadedFilename = filename.toLowerCase().endsWith('.svg') ? filename : `${filename}.svg`;
-  svgStage.innerHTML = '';
-  svgStage.appendChild(loadedSvg);
-  applyRenderMode();
-  rebuildColorPalettes();
-  downloadBtn.disabled = false;
-  history = [];
-  undoBtn.disabled = true;
-  setStatus(`Loaded ${filename}. Found ${loadedSvg.querySelectorAll(shapeSelector).length} drawable shapes.`);
-}
-
-function handleFile(file) {
-  if (!file) {
-    setStatus('Please provide an SVG file.');
-    return;
-  }
-
-  const looksLikeSvg = file.name.toLowerCase().endsWith('.svg') || file.type === 'image/svg+xml';
-  file.text()
-    .then((content) => {
-      if (!looksLikeSvg && !content.includes('<svg')) {
-        setStatus('That file does not look like SVG content.');
-        return;
-      }
-      loadSvgText(content, file.name || 'SVG');
-    })
-    .catch(() => setStatus('Unable to read that file.'));
-}
-
-function getSvgViewportRect() {
-  const viewBox = loadedSvg.viewBox?.baseVal;
-  if (viewBox && viewBox.width > 0 && viewBox.height > 0) {
-    return { x: viewBox.x, y: viewBox.y, width: viewBox.width, height: viewBox.height };
-  }
-
-  const width = Number.parseFloat(loadedSvg.getAttribute('width'));
-  const height = Number.parseFloat(loadedSvg.getAttribute('height'));
-  if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
-    return { x: 0, y: 0, width, height };
-  }
-
-  return loadedSvg.getBBox();
-}
-
-function circleIntersectsBox(center, radius, box) {
-  const nearestX = Math.max(box.x, Math.min(center.x, box.x + box.width));
-  const nearestY = Math.max(box.y, Math.min(center.y, box.y + box.height));
-  const dx = center.x - nearestX;
-  const dy = center.y - nearestY;
-  return dx * dx + dy * dy <= radius * radius;
-}
-
-function screenToSvgPoint(clientX, clientY) {
-  const pt = loadedSvg.createSVGPoint();
-  pt.x = clientX;
-  pt.y = clientY;
-  const ctm = loadedSvg.getScreenCTM();
-  if (!ctm) return { x: 0, y: 0 };
-  const svgPoint = pt.matrixTransform(ctm.inverse());
-  return { x: svgPoint.x, y: svgPoint.y };
-}
-
-function svgToScreenPoint(svgX, svgY) {
-  const ctm = loadedSvg?.getScreenCTM();
-  if (!ctm) return null;
-  const pt = new DOMPoint(svgX, svgY).matrixTransform(ctm);
-  return { x: pt.x, y: pt.y };
-}
-
-function applyFill(item, fill) {
-  item.el.setAttribute('fill', rgbToHex(fill));
-  if (item.el.dataset.renderOriginalFill !== undefined) {
-    item.el.dataset.renderOriginalFill = rgbToHex(fill);
-  }
-}
-
-function pickMergeColorForSpeckle(speckle, items) {
-  if (selectedMergeColor) return selectedMergeColor;
-
-  const candidates = items
-    .filter((item) => item.el !== speckle.el && item.area > speckle.area && item.fill)
-    .filter((item) => {
-      if (!item.geometry) return false;
-      return item.geometry.isPointInFill(new DOMPoint(speckle.center.x, speckle.center.y));
-    })
-    .sort((a, b) => a.area - b.area);
-
-  return candidates[0]?.fill || null;
-}
-
-function getBrushPaperScope() {
-  if (brushPaperScope) return brushPaperScope;
-  brushPaperScope = new paper.PaperScope();
-  brushPaperScope.setup(document.createElement('canvas'));
-  brushPaperScope.view.autoUpdate = false;
-  return brushPaperScope;
-}
-
-function findContainingTarget(speckleItem, items) {
-  const itemByEl = new Map(items.map((item) => [item.el, item]));
-  const screenPoint = svgToScreenPoint(speckleItem.center.x, speckleItem.center.y);
-  if (!screenPoint) return null;
-
-  const stack = document.elementsFromPoint(screenPoint.x, screenPoint.y);
-  for (let i = 0; i < stack.length; i += 1) {
-    const candidateEl = stack[i];
-    if (!(candidateEl instanceof SVGElement)) continue;
-    if (!candidateEl.matches(shapeSelector)) continue;
-    if (candidateEl === speckleItem.el) continue;
-    if (!loadedSvg.contains(candidateEl)) continue;
-
-    const candidate = itemByEl.get(candidateEl);
-    if (!candidate || !candidate.fill || candidate.area <= speckleItem.area) continue;
-    if (candidate.geometry && !candidate.geometry.isPointInFill(new DOMPoint(speckleItem.center.x, speckleItem.center.y))) {
-      continue;
-    }
-    return candidate;
-  }
-
-  return null;
-}
-
-function transferContainerMetadata(sourceEl, targetEl) {
-  [...sourceEl.attributes].forEach((attr) => {
-    if (attr.name === 'd') return;
-    targetEl.setAttribute(attr.name, attr.value);
-  });
-
-  targetEl.setAttribute('fill', rgbToHex(selectedMergeColor || getComputedFill(sourceEl) || '#000000'));
-  targetEl.removeAttribute('stroke');
-  targetEl.removeAttribute('stroke-width');
-
-  if (sourceEl.dataset.renderOriginalFill !== undefined) {
-    targetEl.dataset.renderOriginalFill = rgbToHex(selectedMergeColor || getComputedFill(sourceEl) || '#000000');
-  }
-  if (sourceEl.dataset.renderOriginalStroke !== undefined) {
-    targetEl.dataset.renderOriginalStroke = '';
-  }
-  if (sourceEl.dataset.renderOriginalStrokeWidth !== undefined) {
-    targetEl.dataset.renderOriginalStrokeWidth = '';
-  }
-}
-
-function transferShapeMetadata(sourceEl, targetEl, fillColor = null) {
-  [...sourceEl.attributes].forEach((attr) => {
-    if (attr.name === 'd') return;
-    targetEl.setAttribute(attr.name, attr.value);
-  });
-
-  if (fillColor) {
-    const hexFill = rgbToHex(fillColor);
-    targetEl.setAttribute('fill', hexFill);
-    if (sourceEl.dataset.renderOriginalFill !== undefined) {
-      targetEl.dataset.renderOriginalFill = hexFill;
-    }
-  }
-}
-
-function subtractSpeckleFromTarget(containerEl, speckleEl) {
-  const scope = getBrushPaperScope();
-  scope.project.clear();
-
-  const containerItem = scope.project.importSVG(containerEl.cloneNode(true), { expandShapes: true });
-  const speckleItem = scope.project.importSVG(speckleEl.cloneNode(true), { expandShapes: true });
-  if (!containerItem || !speckleItem) return false;
-
-  const flattenToPaths = (rootItem) => [
-    ...rootItem.getItems({ class: scope.Path }),
-    ...rootItem.getItems({ class: scope.CompoundPath })
-  ];
-
-  const containerPaths = flattenToPaths(containerItem).filter((item) => item.visible && !item.guide);
-  const specklePaths = flattenToPaths(speckleItem).filter((item) => item.visible && !item.guide);
-  if (containerPaths.length === 0 || specklePaths.length === 0) return false;
-
-  const combine = (paths, mode) => {
-    const stack = paths.slice();
-    while (stack.length > 1) {
-      const a = stack.pop();
-      const b = stack.pop();
-      const result = mode === 'unite' ? a.unite(b) : a.subtract(b);
-      if (a.isInserted()) a.remove();
-      if (b.isInserted()) b.remove();
-      stack.push(result);
-    }
-    return stack[0] || null;
-  };
-
-  const containerPath = combine(containerPaths, 'unite');
-  const specklePath = combine(specklePaths, 'unite');
-  if (!containerPath || !specklePath) return false;
-
-  containerPath.fillColor = new scope.Color('black');
-  containerPath.strokeColor = null;
-  specklePath.fillColor = new scope.Color('black');
-  specklePath.strokeColor = null;
-
-  const subtracted = containerPath.subtract(specklePath);
-  if (!subtracted) return false;
-
-  const exportedNode = subtracted.exportSVG({ asString: false });
-  if (!(exportedNode instanceof SVGElement)) return false;
-
-  transferContainerMetadata(containerEl, exportedNode);
-  containerEl.replaceWith(exportedNode);
-  scope.project.clear();
-  return true;
-}
-
-function flattenToUnifiedPath(item, scope) {
-  const paths = [
-    ...item.getItems({ class: scope.Path }),
-    ...item.getItems({ class: scope.CompoundPath })
-  ].filter((child) => child.visible && !child.guide);
-
-  if (paths.length === 0) return null;
-  const stack = paths.slice();
-  while (stack.length > 1) {
-    const a = stack.pop();
-    const b = stack.pop();
-    const unified = a.unite(b);
-    if (a.isInserted()) a.remove();
-    if (b.isInserted()) b.remove();
-    stack.push(unified);
-  }
-
-  return stack[0] || null;
-}
-
-function uniteColorFamily(fillColor) {
-  if (!fillColor || !loadedSvg) return 0;
-  const items = getShapeItems().filter((item) => sameColor(item.fill, fillColor) && item.el.isConnected);
-  if (items.length < 2) return 0;
-
-  const scope = getBrushPaperScope();
-  scope.project.clear();
-
-  const imported = items
-    .map((item) => {
-      const importedItem = scope.project.importSVG(item.el.cloneNode(true), { expandShapes: true });
-      const path = importedItem ? flattenToUnifiedPath(importedItem, scope) : null;
-      if (!path) return null;
-      path.fillColor = new scope.Color('black');
-      path.strokeColor = null;
-      return { original: item.el, path };
-    })
-    .filter(Boolean);
-
-  if (imported.length < 2) {
-    scope.project.clear();
-    return 0;
-  }
-
-  const clusters = [];
-  imported.forEach((entry) => {
-    let merged = false;
-    for (let i = 0; i < clusters.length; i += 1) {
-      const cluster = clusters[i];
-      if (!cluster.path.bounds.intersects(entry.path.bounds)) continue;
-      const combined = cluster.path.unite(entry.path);
-      if (!combined) continue;
-      if (cluster.path.isInserted()) cluster.path.remove();
-      if (entry.path.isInserted()) entry.path.remove();
-      cluster.path = combined;
-      cluster.sources.push(entry.original);
-      merged = true;
-      break;
-    }
-    if (!merged) {
-      clusters.push({ path: entry.path, sources: [entry.original] });
-    }
-  });
-
-  let changed = 0;
-  clusters.forEach((cluster) => {
-    if (cluster.sources.length < 2) return;
-
-    const anchor = cluster.sources[0];
-    const exported = cluster.path.exportSVG({ asString: false });
-    if (!(exported instanceof SVGElement)) return;
-
-    transferShapeMetadata(anchor, exported, fillColor);
-    cluster.sources.forEach((source) => {
-      if (source !== anchor && source.isConnected) source.remove();
-    });
-    if (anchor.isConnected) {
-      anchor.replaceWith(exported);
-      changed += 1;
-    }
-  });
-
-  scope.project.clear();
-  return changed;
-}
-
-function beginBrushSession() {
-  if (!loadedSvg || brushSession) return;
-  brushSession = {
-    before: snapshotSvg(),
-    cutCount: 0,
-    recolorCount: 0,
-    colorsToUnite: new Set()
-  };
-}
-
-function finishBrushSession() {
-  if (!brushSession) return;
-
-  let unionCount = 0;
-  [...brushSession.colorsToUnite].forEach((color) => {
-    unionCount += uniteColorFamily(color);
-  });
-
-  const totalChanges = brushSession.cutCount + brushSession.recolorCount + unionCount;
-  if (totalChanges > 0) {
-    pushHistorySnapshot(brushSession.before);
-    applyRenderMode();
-    rebuildColorPalettes();
-    const mergeHex = rgbToHex(selectedMergeColor || '#000000');
-    setStatus(
-      `Cut ${brushSession.cutCount} speckle(s), recolored ${brushSession.recolorCount}, and united ${unionCount} path cluster(s) to ${mergeHex}.`
-    );
-  }
-
-  brushSession = null;
-}
-
-function performBrushPass(clientX, clientY) {
-  if (!loadedSvg) return;
-  if (!brushSession) beginBrushSession();
-
-  const maxArea = Number(speckleAreaEl.value) || 0;
-  const brushRadius = Number(brushSizeEl.value) || 1;
-  const pointer = screenToSvgPoint(clientX, clientY);
-
-  const items = getShapeItems();
-  const touched = items.filter((item) => {
-    if (item.area > maxArea) return false;
-    if (!circleIntersectsBox(pointer, brushRadius, item.box)) return false;
-    return Boolean(item.fill);
-  });
-
-  if (touched.length === 0) return;
-
-  touched.forEach((speckle) => {
-    if (!speckle.el.isConnected || !speckle.fill) return;
-    const target = findContainingTarget(speckle, items);
-    if (!target?.el?.isConnected) return;
-    if (!subtractSpeckleFromTarget(target.el, speckle.el)) return;
-
-    brushSession.cutCount += 1;
-
-    if (selectedMergeColor) {
-      applyFill(speckle, selectedMergeColor);
-      brushSession.recolorCount += 1;
-      brushSession.colorsToUnite.add(selectedMergeColor);
-    }
-
-    const targetFill = selectedMergeColor || target.fill;
-    if (targetFill) brushSession.colorsToUnite.add(targetFill);
+function renderSwatchSelection(container, color) {
+  [...container.querySelectorAll('.swatch')].forEach((swatch) => {
+    swatch.classList.toggle('active', swatch.dataset.color === color);
   });
 }
 
-function getEdgeTouchingItems(items, targetFill = null) {
-  const svgBox = getSvgViewportRect();
-  const eps = 0.75;
-  return items.filter((item) => {
-    if (!item.fill) return false;
-    if (targetFill && item.fill !== targetFill) return false;
-    return (
-      item.box.x <= svgBox.x + eps ||
-      item.box.y <= svgBox.y + eps ||
-      item.box.x + item.box.width >= svgBox.x + svgBox.width - eps ||
-      item.box.y + item.box.height >= svgBox.y + svgBox.height - eps
-    );
-  });
-}
-
-function getDominantEdgeFill(items) {
-  const edgeItems = getEdgeTouchingItems(items);
-  if (edgeItems.length === 0) return null;
-
-  const areaByFill = new Map();
-  edgeItems.forEach((item) => {
-    areaByFill.set(item.fill, (areaByFill.get(item.fill) || 0) + item.area);
-  });
-  return [...areaByFill.entries()].sort((a, b) => b[1] - a[1])[0][0];
-}
-
-function removeEdgeTouchingByColor(fillColor) {
-  const all = getShapeItems();
-  const edgeItems = getEdgeTouchingItems(all, fillColor);
-  edgeItems.forEach((item) => item.el.remove());
-  return edgeItems.length;
-}
-
-function flattenBackground() {
-  if (!loadedSvg) return setStatus('Load an SVG first.');
-  const all = getShapeItems();
-  const dominantFill = getDominantEdgeFill(all);
-  if (!dominantFill) return setStatus('No edge-touching color found for flattening.');
-
-  captureHistory();
-  const removed = removeEdgeTouchingByColor(dominantFill);
-  const svgBox = getSvgViewportRect();
-
-  const background = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-  background.setAttribute(
-    'd',
-    `M${svgBox.x} ${svgBox.y} H${svgBox.x + svgBox.width} V${svgBox.y + svgBox.height} H${svgBox.x} Z`
-  );
-  background.setAttribute('fill', rgbToHex(dominantFill));
-  loadedSvg.prepend(background);
-
-  applyRenderMode();
-  rebuildColorPalettes();
-  setStatus(`Flattened background color ${rgbToHex(dominantFill)} by replacing ${removed} shape(s).`);
-}
-
-function removeBackgroundColor() {
-  if (!loadedSvg) return setStatus('Load an SVG first.');
-  const all = getShapeItems();
-  const dominantFill = getDominantEdgeFill(all);
-  if (!dominantFill) return setStatus('No edge-touching color found to remove.');
-
-  captureHistory();
-  const removed = removeEdgeTouchingByColor(dominantFill);
-  applyRenderMode();
-  rebuildColorPalettes();
-  setStatus(`Removed ${removed} shape(s) using edge color ${rgbToHex(dominantFill)}.`);
-}
-
-function downloadUpdatedSvg() {
-  if (!loadedSvg) {
-    setStatus('Load an SVG first.');
-    return;
-  }
-
-  try {
-    finishBrushSession();
-    const resultSvg = loadedSvg.cloneNode(true);
-
-    if (renderMode === 'stroke') {
-      [...resultSvg.querySelectorAll(shapeSelector)].forEach((shape) => {
-        const originalFill = shape.dataset.renderOriginalFill;
-        const originalStroke = shape.dataset.renderOriginalStroke;
-        const originalStrokeWidth = shape.dataset.renderOriginalStrokeWidth;
-
-        if (originalFill !== undefined) {
-          if (originalFill) shape.setAttribute('fill', originalFill);
-          else shape.removeAttribute('fill');
-          delete shape.dataset.renderOriginalFill;
-        }
-        if (originalStroke !== undefined) {
-          if (originalStroke) shape.setAttribute('stroke', originalStroke);
-          else shape.removeAttribute('stroke');
-          delete shape.dataset.renderOriginalStroke;
-        }
-        if (originalStrokeWidth !== undefined) {
-          if (originalStrokeWidth) shape.setAttribute('stroke-width', originalStrokeWidth);
-          else shape.removeAttribute('stroke-width');
-          delete shape.dataset.renderOriginalStrokeWidth;
-        }
-        shape.removeAttribute('vector-effect');
-      });
-    }
-
-    if (!resultSvg || !resultSvg.querySelector('*')) {
-      setStatus('Export failed: no geometry returned.');
-      console.error('Export returned empty SVG:', resultSvg);
-      return;
-    }
-
-    const markup = new XMLSerializer().serializeToString(resultSvg);
-
-    if (!markup || markup.length < 50) {
-      setStatus('Export failed: serialized SVG empty.');
-      console.error('Serialized markup:', markup);
-      return;
-    }
-
-    const blob = new Blob([markup], { type: 'image/svg+xml;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = loadedFilename.replace(/\.svg$/i, '') + '-updated.svg';
-
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-
-    setStatus('Download complete.');
-  } catch (err) {
-    console.error(err);
-    setStatus('Export crashed. See console.');
-  }
-}
-
-function applyRenderMode() {
-  if (!loadedSvg) return;
-  const shapes = loadedSvg.querySelectorAll(shapeSelector);
-
-  if (renderMode === 'stroke') {
-    shapes.forEach((shape) => {
-      if (shape.dataset.renderOriginalFill === undefined) {
-        shape.dataset.renderOriginalFill = shape.getAttribute('fill') || '';
-      }
-      if (shape.dataset.renderOriginalStroke === undefined) {
-        shape.dataset.renderOriginalStroke = shape.getAttribute('stroke') || '';
-      }
-      if (shape.dataset.renderOriginalStrokeWidth === undefined) {
-        shape.dataset.renderOriginalStrokeWidth = shape.getAttribute('stroke-width') || '';
-      }
-
-      const fallbackColor = normalizeColor(shape.dataset.renderOriginalStroke)
-        || normalizeColor(shape.dataset.renderOriginalFill)
-        || '#bdbdbd';
-      shape.setAttribute('fill', 'none');
-      shape.setAttribute('stroke', rgbToHex(fallbackColor));
-      shape.setAttribute('stroke-width', '0.75');
-      shape.setAttribute('vector-effect', 'non-scaling-stroke');
-    });
-  } else {
-    shapes.forEach((shape) => {
-      const originalFill = shape.dataset.renderOriginalFill;
-      const originalStroke = shape.dataset.renderOriginalStroke;
-      const originalStrokeWidth = shape.dataset.renderOriginalStrokeWidth;
-
-      if (originalFill !== undefined) {
-        if (originalFill) shape.setAttribute('fill', originalFill);
-        else shape.removeAttribute('fill');
-        delete shape.dataset.renderOriginalFill;
-      }
-      if (originalStroke !== undefined) {
-        if (originalStroke) shape.setAttribute('stroke', originalStroke);
-        else shape.removeAttribute('stroke');
-        delete shape.dataset.renderOriginalStroke;
-      }
-      if (originalStrokeWidth !== undefined) {
-        if (originalStrokeWidth) shape.setAttribute('stroke-width', originalStrokeWidth);
-        else shape.removeAttribute('stroke-width');
-        delete shape.dataset.renderOriginalStrokeWidth;
-      }
-      shape.removeAttribute('vector-effect');
-    });
-  }
-
-  toggleRenderModeBtn.textContent = renderMode === 'stroke' ? 'View: Thin Stroke' : 'View: Filled';
+function setMode(nextMode) {
+  mode = nextMode;
+  modeBrushBtn.classList.toggle('active', mode === 'brush');
+  modePanBtn.classList.toggle('active', mode === 'pan');
+  canvasWrap.classList.toggle('pan-enabled', mode === 'pan');
 }
 
 function applyZoom() {
   svgStage.style.transform = `scale(${zoom})`;
   zoomResetBtn.textContent = `${Math.round(zoom * 100)}%`;
-  updateBrushPreviewSize();
-}
-
-function clampZoom(value) {
-  return Math.max(0.1, Math.min(8, value));
-}
-
-function updateBrushPreviewSize() {
-  const radius = (Number(brushSizeEl.value) || 1) * zoom;
+  const radius = Number(brushSizeEl.value) * zoom;
   brushPreview.style.width = `${radius * 2}px`;
   brushPreview.style.height = `${radius * 2}px`;
 }
 
-function updateBrushPreviewPosition(event) {
-  const wrapRect = canvasWrap.getBoundingClientRect();
-  brushPreview.style.left = `${event.clientX - wrapRect.left + canvasWrap.scrollLeft}px`;
-  brushPreview.style.top = `${event.clientY - wrapRect.top + canvasWrap.scrollTop}px`;
+function screenToSvg(clientX, clientY) {
+  if (!loadedSvg) return { x: 0, y: 0 };
+  const p = loadedSvg.createSVGPoint();
+  p.x = clientX;
+  p.y = clientY;
+  const ctm = loadedSvg.getScreenCTM();
+  if (!ctm) return { x: 0, y: 0 };
+  const mapped = p.matrixTransform(ctm.inverse());
+  return { x: mapped.x, y: mapped.y };
 }
 
-function showDropOverlay() {
-  dropOverlay.classList.add('active');
-  dropOverlay.setAttribute('aria-hidden', 'false');
+function circleIntersectsBox(center, radius, box) {
+  const nearX = Math.max(box.x, Math.min(center.x, box.x + box.width));
+  const nearY = Math.max(box.y, Math.min(center.y, box.y + box.height));
+  const dx = center.x - nearX;
+  const dy = center.y - nearY;
+  return dx * dx + dy * dy <= radius * radius;
 }
 
-function hideDropOverlay() {
-  dropOverlay.classList.remove('active');
-  dropOverlay.setAttribute('aria-hidden', 'true');
-}
-
-fileInput.addEventListener('change', () => handleFile(fileInput.files?.[0]));
-
-allColorsBtn.addEventListener('click', () => {
-  speckleColorMode = speckleColorMode === 'all' ? 'single' : 'all';
-  allColorsBtn.classList.toggle('active', speckleColorMode === 'all');
-  if (speckleColorMode === 'all') {
-    [...specklePaletteEl.querySelectorAll('.color-swatch')].forEach((sw) => sw.classList.remove('active'));
-  } else {
-    selectSwatch(specklePaletteEl, selectedSpeckleColor);
-  }
-});
-
-downloadBtn.addEventListener('click', downloadUpdatedSvg);
-undoBtn.addEventListener('click', undoStep);
-flattenBgBtn.addEventListener('click', flattenBackground);
-removeBgBtn.addEventListener('click', removeBackgroundColor);
-togglePinkBgBtn.addEventListener('click', () => {
-  canvasWrap.classList.toggle('hot-pink-preview');
-  setStatus(
-    canvasWrap.classList.contains('hot-pink-preview')
-      ? 'Hot pink preview background enabled (saved SVG is unchanged).'
-      : 'Hot pink preview background disabled.'
-  );
-});
-
-toggleRenderModeBtn.addEventListener('click', () => {
-  if (!loadedSvg) return setStatus('Load an SVG first.');
-  renderMode = renderMode === 'fill' ? 'stroke' : 'fill';
-  applyRenderMode();
-  setStatus(renderMode === 'stroke' ? 'Thin stroke view enabled.' : 'Filled view enabled.');
-});
-
-zoomInBtn.addEventListener('click', () => {
-  zoom = clampZoom(zoom * 1.2);
-  applyZoom();
-});
-zoomOutBtn.addEventListener('click', () => {
-  zoom = clampZoom(zoom / 1.2);
-  applyZoom();
-});
-zoomResetBtn.addEventListener('click', () => {
-  zoom = 1;
-  applyZoom();
-});
-
-canvasWrap.addEventListener(
-  'wheel',
-  (event) => {
-    if (!event.ctrlKey) return;
-    event.preventDefault();
-    zoom = clampZoom(zoom * (event.deltaY < 0 ? 1.08 : 0.92));
-    applyZoom();
-  },
-  { passive: false }
-);
-
-document.addEventListener('keydown', (event) => {
-  if (event.code !== 'Space') return;
-  const activeTag = document.activeElement?.tagName?.toLowerCase();
-  if (activeTag === 'input' || activeTag === 'textarea' || document.activeElement?.isContentEditable) return;
-  event.preventDefault();
-  isSpaceHeld = true;
-  canvasWrap.classList.add('space-pan');
-});
-
-document.addEventListener('keyup', (event) => {
-  if (event.code !== 'Space') return;
-  event.preventDefault();
-  isSpaceHeld = false;
-  isPanning = false;
-  canvasWrap.classList.remove('space-pan', 'panning');
-});
-
-canvasWrap.addEventListener('mousedown', (event) => {
+function applyBrush(clientX, clientY) {
   if (!loadedSvg) return;
-  if (isSpaceHeld) {
-    isPanning = true;
-    canvasWrap.classList.add('panning');
-    panStart = {
-      x: event.clientX,
-      y: event.clientY,
-      scrollLeft: canvasWrap.scrollLeft,
-      scrollTop: canvasWrap.scrollTop
-    };
+  const brushRadius = Number(brushSizeEl.value);
+  const maxArea = Number(speckleAreaEl.value);
+  if (!Number.isFinite(maxArea) || maxArea <= 0) return;
+
+  const targetColor = toHexColor(selectedTargetColor || replaceColorEl.value);
+  if (!targetColor) return;
+
+  const pointer = screenToSvg(clientX, clientY);
+  const items = getShapeItems();
+
+  let changed = 0;
+  items.forEach((item) => {
+    if (item.area > maxArea) return;
+    if (!circleIntersectsBox(pointer, brushRadius, item.box)) return;
+    if (!item.fillHex) return;
+    if (sourceColorMode === 'single' && item.fillHex !== selectedSourceColor) return;
+    if (item.fillHex === targetColor) return;
+    item.el.setAttribute('fill', targetColor);
+    changed += 1;
+  });
+
+  if (changed > 0) {
+    mergeSameColorShapes([targetColor]);
+    buildPalette();
+    setStatus(`Magic fix recolored ${changed} speckle(s) to ${targetColor}.`);
+  }
+}
+
+function mergeSameColorShapes(colors = null) {
+  if (!loadedSvg) return 0;
+  const palette = colors || [...new Set(getShapeItems().map((i) => i.fillHex).filter(Boolean))];
+  let mergedCount = 0;
+
+  palette.forEach((fill) => {
+    const nodes = [...loadedSvg.querySelectorAll(shapeSelector)].filter((el) => toHexColor(getFill(el)) === fill);
+    if (nodes.length < 2) return;
+
+    const scope = new paper.PaperScope();
+    const canvas = document.createElement('canvas');
+    scope.setup(canvas);
+
+    const imported = nodes
+      .map((node) => {
+        const clone = node.cloneNode(true);
+        clone.removeAttribute('id');
+        return scope.project.importSVG(clone);
+      })
+      .filter(Boolean)
+      .map((item) => {
+        if (item instanceof scope.CompoundPath || item instanceof scope.Path) return item;
+        if (item.children?.length) {
+          const child = item.children.find((c) => c instanceof scope.Path || c instanceof scope.CompoundPath);
+          return child || null;
+        }
+        return null;
+      })
+      .filter(Boolean);
+
+    if (imported.length < 2) {
+      scope.remove();
+      return;
+    }
+
+    let united = imported[0];
+    for (let i = 1; i < imported.length; i += 1) {
+      try {
+        united = united.unite(imported[i]);
+      } catch {
+        // continue with next pair; bad geometry can fail boolean ops.
+      }
+    }
+
+    if (!united || !united.exportSVG) {
+      scope.remove();
+      return;
+    }
+
+    const exported = united.exportSVG({ asString: false });
+    if (!exported) {
+      scope.remove();
+      return;
+    }
+
+    nodes.forEach((node) => node.remove());
+    exported.setAttribute('fill', fill);
+    loadedSvg.appendChild(exported);
+    mergedCount += Math.max(0, nodes.length - 1);
+    scope.remove();
+  });
+
+  return mergedCount;
+}
+
+function undo() {
+  const markup = history.pop();
+  if (!markup) {
+    undoBtn.disabled = true;
     return;
   }
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(markup, 'image/svg+xml');
+  const svg = doc.querySelector('svg');
+  if (!svg) return;
+  loadedSvg = document.importNode(svg, true);
+  loadedSvg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  svgStage.innerHTML = '';
+  svgStage.appendChild(loadedSvg);
+  undoBtn.disabled = history.length === 0;
+  buildPalette();
+  setStatus(`Undo complete. Remaining steps: ${history.length}.`);
+}
 
+function downloadSvg() {
+  if (!loadedSvg) return;
+  const markup = new XMLSerializer().serializeToString(loadedSvg);
+  const blob = new Blob([markup], { type: 'image/svg+xml;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = loadedFilename.replace(/\.svg$/i, '') + '-fixed.svg';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  setStatus('Download complete.');
+}
+
+function loadSvgText(text, filename = 'uploaded.svg') {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(text, 'image/svg+xml');
+  const svg = doc.querySelector('svg');
+  if (!svg || doc.querySelector('parsererror')) {
+    setStatus('Unable to parse SVG file.');
+    return;
+  }
+  loadedSvg = document.importNode(svg, true);
+  loadedSvg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  svgStage.innerHTML = '';
+  svgStage.appendChild(loadedSvg);
+  loadedFilename = filename.toLowerCase().endsWith('.svg') ? filename : `${filename}.svg`;
+  history = [];
+  undoBtn.disabled = true;
+  downloadBtn.disabled = false;
+  buildPalette();
+  applyZoom();
+  setStatus(`Loaded ${loadedFilename}. Brush to magic-fix selected areas.`);
+}
+
+function handleFile(file) {
+  if (!file) return;
+  file.text()
+    .then((text) => loadSvgText(text, file.name || 'uploaded.svg'))
+    .catch(() => setStatus('Could not read file.'));
+}
+
+function updateBrushCursor(event) {
+  const rect = canvasWrap.getBoundingClientRect();
+  brushPreview.style.left = `${event.clientX - rect.left + canvasWrap.scrollLeft}px`;
+  brushPreview.style.top = `${event.clientY - rect.top + canvasWrap.scrollTop}px`;
+}
+
+function startPan(event) {
+  isPanning = true;
+  canvasWrap.classList.add('panning');
+  panStart = {
+    x: event.clientX,
+    y: event.clientY,
+    scrollLeft: canvasWrap.scrollLeft,
+    scrollTop: canvasWrap.scrollTop
+  };
+}
+
+function onMouseDown(event) {
+  if (!loadedSvg) return;
+  if (mode === 'pan' || isSpaceHeld) {
+    startPan(event);
+    return;
+  }
   isDrawing = true;
-  beginBrushSession();
-  updateBrushPreviewPosition(event);
-  brushPreview.style.display = 'block';
-  performBrushPass(event.clientX, event.clientY);
-});
+  pushHistory(snapshot());
+  applyBrush(event.clientX, event.clientY);
+}
 
 canvasWrap.addEventListener('mousemove', (event) => {
   if (!loadedSvg) return;
-  updateBrushPreviewPosition(event);
-  brushPreview.style.display = isSpaceHeld ? 'none' : 'block';
+  updateBrushCursor(event);
+  brushPreview.style.display = mode === 'brush' && !isSpaceHeld ? 'block' : 'none';
 
   if (isPanning) {
     const dx = event.clientX - panStart.x;
@@ -937,53 +393,112 @@ canvasWrap.addEventListener('mousemove', (event) => {
     return;
   }
 
-  if (isDrawing) {
-    performBrushPass(event.clientX, event.clientY);
-  }
+  if (isDrawing) applyBrush(event.clientX, event.clientY);
 });
 
+canvasWrap.addEventListener('mousedown', onMouseDown);
 canvasWrap.addEventListener('mouseleave', () => {
   brushPreview.style.display = 'none';
-});
-
-canvasWrap.addEventListener('mouseup', () => {
-  isDrawing = false;
-  isPanning = false;
-  canvasWrap.classList.remove('panning');
-  finishBrushSession();
 });
 
 document.addEventListener('mouseup', () => {
   isDrawing = false;
   isPanning = false;
   canvasWrap.classList.remove('panning');
-  finishBrushSession();
+});
+
+document.addEventListener('keydown', (event) => {
+  if (event.code !== 'Space') return;
+  const tag = document.activeElement?.tagName?.toLowerCase();
+  if (tag === 'input' || tag === 'textarea' || document.activeElement?.isContentEditable) return;
+  event.preventDefault();
+  isSpaceHeld = true;
+  canvasWrap.classList.add('pan-enabled');
+});
+
+document.addEventListener('keyup', (event) => {
+  if (event.code !== 'Space') return;
+  isSpaceHeld = false;
+  isPanning = false;
+  canvasWrap.classList.remove('pan-enabled', 'panning');
+});
+
+canvasWrap.addEventListener(
+  'wheel',
+  (event) => {
+    if (!event.ctrlKey && !event.metaKey) return;
+    event.preventDefault();
+    zoom = Math.max(0.1, Math.min(6, zoom * (event.deltaY < 0 ? 1.1 : 0.9)));
+    applyZoom();
+  },
+  { passive: false }
+);
+
+allColorsBtn.addEventListener('click', () => {
+  sourceColorMode = sourceColorMode === 'all' ? 'single' : 'all';
+  allColorsBtn.classList.toggle('active', sourceColorMode === 'all');
+  if (sourceColorMode === 'all') {
+    [...sourcePaletteEl.querySelectorAll('.swatch')].forEach((swatch) => swatch.classList.remove('active'));
+  } else {
+    renderSwatchSelection(sourcePaletteEl, selectedSourceColor);
+  }
+});
+
+replaceColorEl.addEventListener('input', () => {
+  selectedTargetColor = replaceColorEl.value;
+  renderSwatchSelection(targetPaletteEl, selectedTargetColor);
+});
+
+brushSizeEl.addEventListener('input', applyZoom);
+fileInput.addEventListener('change', () => handleFile(fileInput.files?.[0]));
+modeBrushBtn.addEventListener('click', () => setMode('brush'));
+modePanBtn.addEventListener('click', () => setMode('pan'));
+undoBtn.addEventListener('click', undo);
+downloadBtn.addEventListener('click', downloadSvg);
+
+mergeBtn.addEventListener('click', () => {
+  if (!loadedSvg) return;
+  pushHistory(snapshot());
+  const merged = mergeSameColorShapes();
+  buildPalette();
+  setStatus(`Merge complete. United ${merged} shape overlap(s) across matching colors.`);
+});
+
+zoomInBtn.addEventListener('click', () => {
+  zoom = Math.min(6, zoom * 1.2);
+  applyZoom();
+});
+zoomOutBtn.addEventListener('click', () => {
+  zoom = Math.max(0.1, zoom / 1.2);
+  applyZoom();
+});
+zoomResetBtn.addEventListener('click', () => {
+  zoom = 1;
+  applyZoom();
 });
 
 document.addEventListener('dragenter', (event) => {
   event.preventDefault();
   pageDragDepth += 1;
-  showDropOverlay();
+  dropOverlay.classList.add('active');
 });
 
 document.addEventListener('dragover', (event) => {
   event.preventDefault();
-  showDropOverlay();
+  dropOverlay.classList.add('active');
 });
 
 document.addEventListener('dragleave', (event) => {
   event.preventDefault();
   pageDragDepth = Math.max(0, pageDragDepth - 1);
-  if (pageDragDepth === 0) hideDropOverlay();
+  if (pageDragDepth === 0) dropOverlay.classList.remove('active');
 });
 
 document.addEventListener('drop', (event) => {
   event.preventDefault();
   pageDragDepth = 0;
-  hideDropOverlay();
+  dropOverlay.classList.remove('active');
   handleFile(event.dataTransfer?.files?.[0]);
 });
 
-brushSizeEl.addEventListener('input', updateBrushPreviewSize);
 applyZoom();
-updateBrushPreviewSize();

@@ -3,81 +3,76 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>SVG Magic Eraser</title>
+    <title>SVG Speckle Remaker</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <aside class="sidebar">
-      <h1>SVG Magic Eraser</h1>
-      <p class="hint">Drop an SVG, then brush over speckles to merge them into your chosen color.</p>
+    <aside class="panel">
+      <h1>SVG Speckle Remaker</h1>
+      <p class="hint">Drop an SVG, brush over noisy speckles, and remap them into a selected color.</p>
 
-      <div class="group">
-        <label for="fileInput">Open SVG file</label>
+      <section class="group">
+        <label for="fileInput">Load SVG</label>
         <input id="fileInput" type="file" accept=".svg,image/svg+xml" />
-      </div>
+      </section>
 
-      <div class="group">
-        <label for="speckleArea">Speckle max bbox area (SVG units²)</label>
-        <input id="speckleArea" type="number" min="0" value="800" step="50" />
-      </div>
+      <section class="group">
+        <label for="speckleArea">Speckle max area</label>
+        <input id="speckleArea" type="number" min="1" value="500" step="10" />
+      </section>
 
-      <div class="group">
-        <label>Speckle color to remove</label>
-        <div class="row compact-row">
-          <button id="allColorsBtn" type="button" class="all-colors-btn" aria-label="All colors"></button>
-          <div id="specklePalette" class="color-palette inline"></div>
-        </div>
-      </div>
-
-      <div class="group">
-        <label>Merge/unite with color</label>
-        <div id="mergePalette" class="color-palette"></div>
-      </div>
-
-      <div class="group">
-        <label for="brushSize">Brush size (px)</label>
-        <input id="brushSize" type="number" min="1" value="10" step="1" />
-      </div>
-
-      <div class="group row">
-        <button id="undoBtn" disabled>Undo</button>
-        <button id="downloadBtn" disabled>Download SVG</button>
-      </div>
-
-      <div class="group row">
-        <button id="flattenBgBtn">Flatten background color</button>
-        <button id="removeBgBtn">Remove background color</button>
-      </div>
-
-      <div class="group">
-        <button id="togglePinkBgBtn" type="button">Toggle hot pink preview background</button>
-      </div>
-
-      <div class="group">
-        <button id="toggleRenderModeBtn" type="button">View: Filled</button>
-      </div>
-
-      <div class="group">
-        <label>Zoom controls</label>
+      <section class="group">
+        <label>Speckle source color</label>
         <div class="row">
-          <button id="zoomOut">-</button>
-          <button id="zoomReset">100%</button>
-          <button id="zoomIn">+</button>
+          <button id="allColorsBtn" type="button" class="toggle active">All</button>
+          <div id="sourcePalette" class="palette"></div>
         </div>
-      </div>
+      </section>
 
-      <p class="hint">Tips: Ctrl + mouse wheel = zoom. Hold Space and drag to pan.</p>
-      <div id="status" class="status">No SVG loaded.</div>
+      <section class="group">
+        <label>Replacement color</label>
+        <div class="row stack">
+          <input id="replaceColor" type="color" value="#111111" />
+          <div id="targetPalette" class="palette"></div>
+        </div>
+      </section>
+
+      <section class="group">
+        <label for="brushSize">Brush radius (px)</label>
+        <input id="brushSize" type="range" min="2" max="80" value="14" />
+      </section>
+
+      <section class="group row">
+        <button id="modeBrushBtn" class="active">Brush Fix</button>
+        <button id="modePanBtn">Pan</button>
+      </section>
+
+      <section class="group row">
+        <button id="mergeBtn">Merge/Unite Same Colors</button>
+        <button id="undoBtn" disabled>Undo</button>
+      </section>
+
+      <section class="group row">
+        <button id="zoomOutBtn">-</button>
+        <button id="zoomResetBtn">100%</button>
+        <button id="zoomInBtn">+</button>
+      </section>
+
+      <section class="group">
+        <button id="downloadBtn" disabled>Download SVG</button>
+      </section>
+
+      <p class="hint">Tip: Ctrl/⌘ + mouse wheel to zoom. Hold Space for temporary pan.</p>
+      <p id="status" class="status">Drop or load an SVG to begin.</p>
     </aside>
 
-    <main class="viewer">
+    <main class="workspace">
       <div id="canvasWrap">
         <div id="svgStage"></div>
         <div id="brushPreview" aria-hidden="true"></div>
       </div>
+      <div id="dropOverlay" aria-hidden="true">Drop SVG to import</div>
     </main>
-
-    <div id="dropOverlay" aria-hidden="true">Drop file to import</div>
 
     <script src="https://unpkg.com/paper@0.12.17/dist/paper-full.min.js"></script>
     <script src="app.js"></script>
