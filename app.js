@@ -69,16 +69,56 @@ function toHexColor(rawColor) {
 }
 
 function getFill(el) {
-  const direct = normalizeColor(el.getAttribute('fill'));
-  if (direct) return direct;
-  const inline = normalizeColor(el.style.fill);
-  return inline;
+  let node = el;
+  while (node && node instanceof Element) {
+    const direct = normalizeColor(node.getAttribute('fill'));
+    if (direct) return direct;
+    const inline = normalizeColor(node.style.fill);
+    if (inline) return inline;
+    node = node.parentElement;
+  }
+  return null;
 }
 
 function getStroke(el) {
-  const direct = normalizeColor(el.getAttribute('stroke'));
-  if (direct) return direct;
-  return normalizeColor(el.style.stroke);
+  let node = el;
+  while (node && node instanceof Element) {
+    const direct = normalizeColor(node.getAttribute('stroke'));
+    if (direct) return direct;
+    const inline = normalizeColor(node.style.stroke);
+    if (inline) return inline;
+    node = node.parentElement;
+  }
+  return null;
+}
+
+function stripStrokeRecursively(node) {
+  if (!(node instanceof Element)) return;
+  node.removeAttribute('stroke');
+  node.removeAttribute('stroke-width');
+  node.removeAttribute('stroke-opacity');
+  node.style.stroke = '';
+  node.style.strokeWidth = '';
+  node.style.strokeOpacity = '';
+  [...node.children].forEach((child) => stripStrokeRecursively(child));
+}
+
+function pathHasOpenSubpath(pathData) {
+  if (!pathData) return false;
+  const commands = pathData.match(/[a-zA-Z]/g);
+  if (!commands) return false;
+
+  let subpathOpen = false;
+  for (const command of commands) {
+    if (command === 'M' || command === 'm') {
+      if (subpathOpen) return true;
+      subpathOpen = true;
+    }
+    if (command === 'Z' || command === 'z') {
+      subpathOpen = false;
+    }
+  }
+  return subpathOpen;
 }
 
 function setElementFill(el, color) {
@@ -424,9 +464,7 @@ function mergeSameColorShapes(colors = null) {
       }
 
       groupNodes.forEach((node) => node.remove());
-      exported.removeAttribute('stroke');
-      exported.removeAttribute('stroke-width');
-      exported.removeAttribute('stroke-opacity');
+      stripStrokeRecursively(exported);
       setElementFill(exported, fill);
       loadedSvg.appendChild(exported);
       mergedCount += Math.max(0, groupNodes.length - 1);
@@ -454,8 +492,7 @@ function cleanupOpenStrokeArtifacts(maxArea = Number(speckleAreaEl.value) * 4) {
 
     if (tag === 'path') {
       const d = (el.getAttribute('d') || '').trim();
-      const isClosed = /z\s*$/i.test(d);
-      if (!isClosed) {
+      if (pathHasOpenSubpath(d)) {
         el.remove();
         removed += 1;
         return;
