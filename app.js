@@ -358,7 +358,10 @@ function applyBrush(clientX, clientY) {
 
   let changed = 0;
   items.forEach((item) => {
-    if (item.area > maxArea) return;
+    // Allow merged compound paths (paths) to remain brush-editable
+    if (item.area > maxArea) {
+      if (item.el.tagName.toLowerCase() !== 'path') return;
+    }
     if (!elementIntersectsBrush(item, pointer, brushRadius)) return;
     if (!item.fillHex) return;
     if (sourceColorMode === 'single' && item.fillHex !== selectedSourceColor) return;
@@ -477,35 +480,51 @@ function mergeSameColorShapes(colors = null) {
 
 function cleanupOpenStrokeArtifacts(maxArea = Number(speckleAreaEl.value) * 4) {
   if (!loadedSvg) return 0;
+
   const areaLimit = Number.isFinite(maxArea) && maxArea > 0 ? maxArea : 2000;
   let removed = 0;
+
   [...loadedSvg.querySelectorAll(shapeSelector)].forEach((el) => {
     const tag = el.tagName.toLowerCase();
+
+    // Remove lines and polylines
     if (tag === 'line' || tag === 'polyline') {
       el.remove();
-      removed += 1;
+      removed++;
       return;
     }
+
     const fillHex = toHexColor(getFill(el));
     const stroke = getStroke(el);
-    if (fillHex || !stroke) return;
 
+    const box = el.getBBox();
+    const area = box.width * box.height;
+
+    // Remove tiny fragments
+    if (Number.isFinite(area) && area <= areaLimit) {
+      el.remove();
+      removed++;
+      return;
+    }
+
+    // Remove open or invalid paths
     if (tag === 'path') {
       const d = (el.getAttribute('d') || '').trim();
-      if (pathHasOpenSubpath(d)) {
+      if (!d || pathHasOpenSubpath(d)) {
         el.remove();
-        removed += 1;
+        removed++;
         return;
       }
     }
 
-    const box = el.getBBox();
-    const area = box.width * box.height;
-    if (Number.isFinite(area) && area <= areaLimit) {
+    // Remove stroke-only leftovers
+    if (!fillHex && stroke) {
       el.remove();
-      removed += 1;
+      removed++;
+      return;
     }
   });
+
   return removed;
 }
 
@@ -693,7 +712,9 @@ mergeBtn.addEventListener('click', () => {
   if (!loadedSvg) return;
   pushHistory(snapshot());
   const merged = mergeSameColorShapes();
-  const removed = cleanupOpenStrokeArtifacts();
+  const removed1 = cleanupOpenStrokeArtifacts();
+  const removed2 = cleanupOpenStrokeArtifacts();
+  const removed = removed1 + removed2;
   buildPalette();
   setStatus(`Merge complete. United ${merged} overlap(s) and removed ${removed} open stroke artifact(s).`);
 });
