@@ -298,8 +298,13 @@ function circleIntersectsBox(center, radius, box) {
 }
 
 function screenToSvgPoint(clientX, clientY) {
-  const rect = loadedSvg.getBoundingClientRect();
-  return { x: (clientX - rect.left) / zoom, y: (clientY - rect.top) / zoom };
+  const pt = loadedSvg.createSVGPoint();
+  pt.x = clientX;
+  pt.y = clientY;
+  const ctm = loadedSvg.getScreenCTM();
+  if (!ctm) return { x: 0, y: 0 };
+  const svgPoint = pt.matrixTransform(ctm.inverse());
+  return { x: svgPoint.x, y: svgPoint.y };
 }
 
 function applyFill(item, fill) {
@@ -332,18 +337,20 @@ function getBrushPaperScope() {
 }
 
 function findContainingTarget(speckleItem, items) {
-  const mergeColor = selectedMergeColor || pickMergeColorForSpeckle(speckleItem, items);
-  if (!mergeColor) return null;
-
   const { x, y } = speckleItem.center;
 
   const candidates = items
     .filter((item) => item.el !== speckleItem.el)
     .filter((item) => item.area > speckleItem.area)
-    .filter((item) => item.fill && sameColor(item.fill, mergeColor))
+    .filter((item) => item.fill) // must have fill
     .filter((item) => {
       const b = item.box;
-      return x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height;
+      return (
+        x >= b.x &&
+        x <= b.x + b.width &&
+        y >= b.y &&
+        y <= b.y + b.height
+      );
     })
     .sort((a, b) => a.area - b.area);
 
