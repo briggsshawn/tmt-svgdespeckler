@@ -3,12 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>SVG Speckle Remaker</title>
+    <title>SVG Speckle and Color Repair</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <aside class="panel">
-      <h1>SVG Speckle Remaker</h1>
+      <h1>SVG Speckle and Color Repair</h1>
       <p class="hint">Drop an SVG, choose a working color, then brush to erase touched interior speckles/artifacts of any color.</p>
 
       <section class="group">
@@ -16,64 +16,103 @@
         <input id="fileInput" type="file" accept=".svg,image/svg+xml" />
       </section>
 
-      <section class="group">
-        <label for="speckleArea">Speckle max area</label>
-        <input id="speckleArea" type="number" min="1" value="500" step="10" />
+      <section class="group topControls">
+        <div class="canvasBlock">
+          <label for="canvasBgColor">Canvas</label>
+          <input id="canvasBgColor" class="color-block" type="color" value="#0a0b0f" aria-label="Canvas color" />
+        </div>
       </section>
 
       <section class="group">
-        <label for="canvasBgColor">Canvas background</label>
-        <input id="canvasBgColor" type="color" value="#0a0b0f" />
-      </section>
-
-      <section class="group">
-        <label>Working Color - (Remove speckles from)</label>
+        <label>Working Color</label>
         <div class="row stack">
-          <input id="replaceColor" type="color" value="#111111" />
-          <div id="targetPalette" class="palette"></div>
+          <div class="colorControl">
+            <input id="replaceColor" class="color-block" type="color" value="#111111" aria-label="Working color" />
+            <div id="targetPalette" class="palette"></div>
+          </div>
           <label class="checkRow">
             <input id="deleteAllMatching" type="checkbox" />
             <span>Delete all matching with brush</span>
           </label>
           <label class="checkRow">
             <input id="fillAndMerge" type="checkbox" />
-            <span>Fill and Merge - do not delete</span>
+            <span>Fill and Merge (Flood clicked color)</span>
           </label>
         </div>
       </section>
+
+      <details class="group mergeGroup">
+        <summary>Merge / Delete</summary>
+        <div class="groupBody">
+          <div class="mergePickers">
+            <div class="mergePicker">
+              <label for="mergeColorA" class="subLabel">Base Color</label>
+              <div class="colorControl">
+                <input id="mergeColorA" class="color-block" type="color" value="#111111" aria-label="Base color" />
+                <div id="mergePaletteA" class="palette"></div>
+              </div>
+            </div>
+            <div class="mergePicker">
+              <label for="mergeColorB" class="subLabel">Merge Color</label>
+              <div class="colorControl">
+                <input id="mergeColorB" class="color-block" type="color" value="#222222" aria-label="Merge color" />
+                <div id="mergePaletteB" class="palette"></div>
+              </div>
+            </div>
+          </div>
+          <button id="mergeTwoColorsBtn">Merge Selected Colors</button>
+          <button id="deleteBaseColorBtn">Delete Selected Base Color</button>
+        </div>
+      </details>
 
       <section class="group">
         <label for="brushSize">Brush radius (px)</label>
         <input id="brushSize" type="range" min="2" max="80" value="14" />
       </section>
 
-      <section class="group row">
-        <button id="modeBrushBtn" class="active">Brush Erase</button>
-        <button id="modeOpenPathBtn">Open Path Del</button>
-        <button id="modePanBtn">Pan</button>
+      <section class="group">
+        <label for="speckleArea">Path max size to remove <span id="speckleAreaValue" class="inlineValue">90</span></label>
+        <input id="speckleArea" type="range" min="10" max="500" value="90" step="1" />
       </section>
 
       <section class="group row">
-        <button id="viewFillsBtn" class="active">View Fills</button>
-        <button id="viewStrokesBtn">View Strokes</button>
-      </section>
-
-      <section class="group row">
-        <button id="mergeBtn">Merge/Unite Working Color</button>
-        <button id="undoBtn" disabled>Undo</button>
-      </section>
-
-      <section class="group row">
-        <button id="zoomOutBtn">-</button>
-        <button id="zoomResetBtn">100%</button>
-        <button id="zoomInBtn">+</button>
+        <button id="modeBrushBtn" class="active">Remove Small Paths</button>
+        <button id="modeOpenPathBtn">Delete Open Paths</button>
       </section>
 
       <section class="group">
-        <button id="downloadBtn" disabled>Download SVG</button>
+        <button id="openPathCleanAllBtn">Open Path Clean All</button>
       </section>
 
-      <p class="hint">Tip: Ctrl/⌘ + mouse wheel to zoom. Hold Space for temporary pan.</p>
+      <section class="group">
+        <button id="viewToggleBtn">Stroke View</button>
+      </section>
+
+      <section class="group">
+        <label>Crop</label>
+        <div class="row stack">
+          <label for="cropRatio" class="subLabel">Aspect ratio</label>
+          <select id="cropRatio">
+            <option value="current" selected>Current Aspect Ratio</option>
+            <option value="1:1">1:1</option>
+            <option value="2:3">2:3</option>
+            <option value="3:2">3:2</option>
+            <option value="4:5">4:5</option>
+            <option value="5:4">5:4</option>
+          </select>
+          <label for="cropPadding" class="subLabel">Padding</label>
+          <input id="cropPadding" type="number" min="0" value="0" step="1" />
+          <label for="cropAlign" class="subLabel">Horizontal align</label>
+          <select id="cropAlign">
+            <option value="center" selected>Center</option>
+            <option value="left">Left</option>
+            <option value="right">Right</option>
+          </select>
+          <button id="applyCropBtn">Apply Crop</button>
+        </div>
+      </section>
+
+      <p class="hint">Tip: Ctrl/Cmd + mouse wheel to zoom. Hold Space for temporary pan.</p>
       <p id="status" class="status">Drop or load an SVG to begin.</p>
     </aside>
 
@@ -81,9 +120,20 @@
       <div id="canvasWrap">
         <div id="svgStage"></div>
         <div id="brushPreview" aria-hidden="true"></div>
+        <div id="cropPreview" aria-hidden="true"></div>
       </div>
       <div id="dropOverlay" aria-hidden="true">Drop SVG to import</div>
+      <div class="viewport-controls">
+        <button id="modePanBtn">Pan</button>
+        <button id="zoomOutBtn">-</button>
+        <button id="zoomResetBtn">100%</button>
+        <button id="zoomInBtn">+</button>
+        <button id="mergeBtn">Merge Active Color</button>
+        <button id="undoBtn" disabled>Undo</button>
+      </div>
     </main>
+
+    <button id="downloadBtn" class="floating-download" disabled>Download SVG</button>
 
     <script src="https://unpkg.com/paper@0.12.17/dist/paper-full.min.js"></script>
     <script src="app.js"></script>

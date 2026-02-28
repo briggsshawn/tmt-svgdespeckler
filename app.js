@@ -2,9 +2,11 @@ const fileInput = document.getElementById('fileInput');
 const svgStage = document.getElementById('svgStage');
 const canvasWrap = document.getElementById('canvasWrap');
 const brushPreview = document.getElementById('brushPreview');
+const cropPreviewEl = document.getElementById('cropPreview');
 const dropOverlay = document.getElementById('dropOverlay');
 const statusEl = document.getElementById('status');
 const speckleAreaEl = document.getElementById('speckleArea');
+const speckleAreaValueEl = document.getElementById('speckleAreaValue');
 const canvasBgColorEl = document.getElementById('canvasBgColor');
 const targetPaletteEl = document.getElementById('targetPalette');
 const replaceColorEl = document.getElementById('replaceColor');
@@ -13,12 +15,22 @@ const fillAndMergeEl = document.getElementById('fillAndMerge');
 const brushSizeEl = document.getElementById('brushSize');
 const modeBrushBtn = document.getElementById('modeBrushBtn');
 const modeOpenPathBtn = document.getElementById('modeOpenPathBtn');
+const openPathCleanAllBtn = document.getElementById('openPathCleanAllBtn');
 const modePanBtn = document.getElementById('modePanBtn');
-const viewFillsBtn = document.getElementById('viewFillsBtn');
-const viewStrokesBtn = document.getElementById('viewStrokesBtn');
+const viewToggleBtn = document.getElementById('viewToggleBtn');
 const mergeBtn = document.getElementById('mergeBtn');
+const mergeColorAEl = document.getElementById('mergeColorA');
+const mergePaletteAEl = document.getElementById('mergePaletteA');
+const mergeColorBEl = document.getElementById('mergeColorB');
+const mergePaletteBEl = document.getElementById('mergePaletteB');
+const mergeTwoColorsBtn = document.getElementById('mergeTwoColorsBtn');
+const deleteBaseColorBtn = document.getElementById('deleteBaseColorBtn');
 const undoBtn = document.getElementById('undoBtn');
 const downloadBtn = document.getElementById('downloadBtn');
+const cropRatioEl = document.getElementById('cropRatio');
+const cropPaddingEl = document.getElementById('cropPadding');
+const cropAlignEl = document.getElementById('cropAlign');
+const applyCropBtn = document.getElementById('applyCropBtn');
 const zoomOutBtn = document.getElementById('zoomOutBtn');
 const zoomInBtn = document.getElementById('zoomInBtn');
 const zoomResetBtn = document.getElementById('zoomResetBtn');
@@ -37,12 +49,16 @@ let mode = 'brush';
 let isSpaceHeld = false;
 let isPanning = false;
 let selectedTargetColor = '#111111';
+let mergeColorA = '#111111';
+let mergeColorB = '#222222';
 let viewMode = 'fills';
 let panStart = { x: 0, y: 0, scrollLeft: 0, scrollTop: 0 };
 let history = [];
 let isMerging = false;
 let queuedFillMergeColor = null;
 let queuedFillMergeCount = 0;
+let fillMergeGestureDone = false;
+let heldPreviewColor = null;
 
 function loadUiSettings() {
   try {
@@ -62,8 +78,13 @@ function saveUiSettings() {
       brushSize: Number(brushSizeEl?.value),
       canvasBgColor: canvasBgColorEl?.value || '#0a0b0f',
       workingColor: replaceColorEl?.value || '#111111',
+      mergeColorA: mergeColorAEl?.value || '#111111',
+      mergeColorB: mergeColorBEl?.value || '#222222',
       deleteAllMatching: Boolean(deleteAllMatchingEl?.checked),
       fillAndMerge: Boolean(fillAndMergeEl?.checked),
+      cropRatio: cropRatioEl?.value || 'current',
+      cropPadding: Number(cropPaddingEl?.value) || 0,
+      cropAlign: cropAlignEl?.value || 'center',
       mode,
       viewMode
     };
@@ -80,7 +101,11 @@ function setStatus(message) {
 function applyCanvasBackground(color) {
   const normalized = toHexColor(color);
   if (!normalized) return;
-  canvasWrap.style.background = normalized;
+  canvasWrap.style.setProperty('--canvas-bg', normalized);
+}
+
+function setCanvasTransparencyMode(enabled) {
+  canvasWrap.classList.toggle('transparent-checker', Boolean(enabled));
 }
 
 function waitForUiFrame() {
@@ -106,11 +131,30 @@ function applyLoadedUiSettings() {
     const c = toHexColor(settings.workingColor);
     if (c) replaceColorEl.value = c;
   }
+  if (typeof settings.mergeColorA === 'string') {
+    const c = toHexColor(settings.mergeColorA);
+    if (c && mergeColorAEl) mergeColorAEl.value = c;
+  }
+  if (typeof settings.mergeColorB === 'string') {
+    const c = toHexColor(settings.mergeColorB);
+    if (c && mergeColorBEl) mergeColorBEl.value = c;
+  }
   if (typeof settings.deleteAllMatching === 'boolean' && deleteAllMatchingEl) {
     deleteAllMatchingEl.checked = settings.deleteAllMatching;
   }
   if (typeof settings.fillAndMerge === 'boolean' && fillAndMergeEl) {
     fillAndMergeEl.checked = settings.fillAndMerge;
+  }
+  if (typeof settings.cropRatio === 'string' && cropRatioEl) {
+    const allowed = new Set(['current', '1:1', '2:3', '3:2', '4:5', '5:4']);
+    if (allowed.has(settings.cropRatio)) cropRatioEl.value = settings.cropRatio;
+  }
+  if (Number.isFinite(settings.cropPadding) && settings.cropPadding >= 0 && cropPaddingEl) {
+    cropPaddingEl.value = String(Math.round(settings.cropPadding));
+  }
+  if (typeof settings.cropAlign === 'string' && cropAlignEl) {
+    const allowed = new Set(['center', 'left', 'right']);
+    if (allowed.has(settings.cropAlign)) cropAlignEl.value = settings.cropAlign;
   }
   if (settings.mode === 'pan' || settings.mode === 'brush' || settings.mode === 'openPathDel') {
     mode = settings.mode;
@@ -336,6 +380,10 @@ function setElementFill(el, color) {
   el.style.fill = color;
   el.style.fillOpacity = '1';
   el.removeAttribute('fill-opacity');
+  if (viewMode === 'strokes') {
+    const previewStroke = toHexColor(color) || color;
+    el.style.setProperty('--preview-stroke', previewStroke);
+  }
 }
 
 function snapshot() {
@@ -442,36 +490,42 @@ function pushHistory(markup) {
   undoBtn.disabled = history.length === 0;
 }
 
+function getElementTransformedBox(el) {
+  if (!(el instanceof SVGGraphicsElement)) return null;
+  let box;
+  let ctm;
+  try {
+    box = el.getBBox();
+    ctm = el.getCTM();
+  } catch {
+    return null;
+  }
+  if (!ctm) return null;
+
+  const transformedCorners = [
+    new DOMPoint(box.x, box.y),
+    new DOMPoint(box.x + box.width, box.y),
+    new DOMPoint(box.x, box.y + box.height),
+    new DOMPoint(box.x + box.width, box.y + box.height)
+  ].map((pt) => pt.matrixTransform(ctm));
+
+  const xs = transformedCorners.map((p) => p.x);
+  const ys = transformedCorners.map((p) => p.y);
+  return {
+    x: Math.min(...xs),
+    y: Math.min(...ys),
+    width: Math.max(...xs) - Math.min(...xs),
+    height: Math.max(...ys) - Math.min(...ys)
+  };
+}
+
 function getShapeItems({ includeBackground = false, includeZeroArea = false } = {}) {
   if (!loadedSvg) return [];
   return [...loadedSvg.querySelectorAll(shapeSelector)]
     .map((el) => {
       if (!includeBackground && el.getAttribute(BACKGROUND_LAYER_ATTR) === '1') return null;
-      let box;
-      let ctm;
-      try {
-        box = el.getBBox();
-        ctm = el.getCTM();
-      } catch {
-        return null;
-      }
-      if (!ctm) return null;
-
-      const transformedCorners = [
-        new DOMPoint(box.x, box.y),
-        new DOMPoint(box.x + box.width, box.y),
-        new DOMPoint(box.x, box.y + box.height),
-        new DOMPoint(box.x + box.width, box.y + box.height)
-      ].map((pt) => pt.matrixTransform(ctm));
-
-      const xs = transformedCorners.map((p) => p.x);
-      const ys = transformedCorners.map((p) => p.y);
-      const bbox = {
-        x: Math.min(...xs),
-        y: Math.min(...ys),
-        width: Math.max(...xs) - Math.min(...xs),
-        height: Math.max(...ys) - Math.min(...ys)
-      };
+      const bbox = getElementTransformedBox(el);
+      if (!bbox) return null;
       const fill = getFill(el);
       return {
         el,
@@ -486,6 +540,43 @@ function getShapeItems({ includeBackground = false, includeZeroArea = false } = 
       if (includeZeroArea) return item.area >= 0;
       return item.area > 0;
     });
+}
+
+function clampNumber(value, min, max) {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, value));
+}
+
+function renderSpeckleAreaValue() {
+  if (!speckleAreaValueEl || !speckleAreaEl) return;
+  const current = Math.round(Number(speckleAreaEl.value) || 0);
+  const min = Math.round(Number(speckleAreaEl.min) || 10);
+  const max = Math.round(Number(speckleAreaEl.max) || 10);
+  speckleAreaValueEl.textContent = `${current} / ${max}`;
+  speckleAreaEl.title = `Range: ${min} to ${max}`;
+}
+
+function deriveSpeckleAreaMax() {
+  if (!loadedSvg) return 500;
+  const allItems = getShapeItems();
+  if (allItems.length === 0) return 10;
+  const pathItems = allItems.filter((item) => item.el.tagName.toLowerCase() === 'path');
+  const sourceItems = pathItems.length > 0 ? pathItems : allItems;
+  const largestArea = sourceItems.reduce((largest, item) => Math.max(largest, item.area), 0);
+  const halfLargest = Math.floor(largestArea / 2);
+  return Math.max(10, halfLargest);
+}
+
+function updateSpeckleAreaControl(preferredValue = null) {
+  if (!speckleAreaEl) return;
+  const min = 10;
+  const max = deriveSpeckleAreaMax();
+  const desired = Number.isFinite(preferredValue) ? preferredValue : Number(speckleAreaEl.value);
+  const nextValue = Math.round(clampNumber(desired, min, max));
+  speckleAreaEl.min = String(min);
+  speckleAreaEl.max = String(max);
+  speckleAreaEl.value = String(nextValue);
+  renderSpeckleAreaValue();
 }
 
 function detectEdgeTouchingBackgroundColor() {
@@ -545,14 +636,34 @@ function normalizeBackgroundToViewportRect() {
   return { color: backgroundColor, removed, inserted: true };
 }
 
+function getBackgroundFillHex() {
+  if (!loadedSvg) return null;
+  const bgNode = loadedSvg.querySelector(`[${BACKGROUND_LAYER_ATTR}="1"]`);
+  if (!(bgNode instanceof Element)) return null;
+  return toHexColor(getFill(bgNode));
+}
+
 function buildPalette() {
   if (!loadedSvg) return;
   const unique = [...new Set(getShapeItems().map((i) => i.fillHex).filter(Boolean))].sort();
+  const backgroundFillHex = getBackgroundFillHex();
+  if (backgroundFillHex && !unique.includes(backgroundFillHex)) unique.push(backgroundFillHex);
+  unique.sort();
+  setCanvasTransparencyMode(!backgroundFillHex);
 
   if (!selectedTargetColor || (unique.length > 0 && !unique.includes(selectedTargetColor))) {
     selectedTargetColor = unique[0] || '#111111';
   }
+  if (!mergeColorA || (unique.length > 0 && !unique.includes(mergeColorA))) {
+    mergeColorA = unique[0] || '#111111';
+  }
+  if (!mergeColorB || (unique.length > 0 && !unique.includes(mergeColorB))) {
+    mergeColorB = unique.find((color) => color !== mergeColorA) || mergeColorA || '#222222';
+  }
+
   if (replaceColorEl) replaceColorEl.value = selectedTargetColor;
+  if (mergeColorAEl) mergeColorAEl.value = mergeColorA;
+  if (mergeColorBEl) mergeColorBEl.value = mergeColorB;
 
   renderPalette(targetPaletteEl, unique, (color) => {
     selectedTargetColor = color;
@@ -560,15 +671,90 @@ function buildPalette() {
     renderSwatchSelection(targetPaletteEl, color);
     saveUiSettings();
   });
+  renderPalette(mergePaletteAEl, unique, (color) => {
+    mergeColorA = color;
+    if (mergeColorAEl) mergeColorAEl.value = color;
+    renderSwatchSelection(mergePaletteAEl, color);
+    saveUiSettings();
+  });
+  renderPalette(mergePaletteBEl, unique, (color) => {
+    mergeColorB = color;
+    if (mergeColorBEl) mergeColorBEl.value = color;
+    renderSwatchSelection(mergePaletteBEl, color);
+    saveUiSettings();
+  });
 
   renderSwatchSelection(targetPaletteEl, selectedTargetColor);
+  renderSwatchSelection(mergePaletteAEl, mergeColorA);
+  renderSwatchSelection(mergePaletteBEl, mergeColorB);
+  updateSpeckleAreaControl();
+  updatePreviewStrokeColors();
+  renderCropPreview();
 }
 
 function applyViewMode() {
-  viewFillsBtn.classList.toggle('active', viewMode === 'fills');
-  viewStrokesBtn.classList.toggle('active', viewMode === 'strokes');
+  if (viewToggleBtn) {
+    const showingStrokes = viewMode === 'strokes';
+    viewToggleBtn.classList.toggle('active', showingStrokes);
+    viewToggleBtn.textContent = showingStrokes ? 'Fill View' : 'Stroke View';
+  }
   if (!loadedSvg) return;
   loadedSvg.classList.toggle('preview-strokes', viewMode === 'strokes');
+  updatePreviewStrokeColors();
+}
+
+function clearHeldColorPreviewStyles() {
+  if (!loadedSvg) return;
+  [...loadedSvg.querySelectorAll(shapeSelector)].forEach((el) => {
+    el.classList.remove('hold-dim', 'hold-highlight');
+  });
+}
+
+function applyHeldColorPreview() {
+  if (!loadedSvg || !heldPreviewColor) return;
+  const focusColor = toHexColor(heldPreviewColor);
+  if (!focusColor) return;
+
+  [...loadedSvg.querySelectorAll(shapeSelector)].forEach((el) => {
+    const fillHex = toHexColor(getFill(el));
+    const matches = fillHex === focusColor;
+    el.classList.toggle('hold-highlight', matches);
+    el.classList.toggle('hold-dim', !matches);
+
+    if (viewMode === 'strokes') {
+      el.style.setProperty('--preview-stroke', matches ? (fillHex || '#4f8cff') : '#7b8393');
+    }
+  });
+}
+
+function beginHeldColorPreview(color) {
+  const focusColor = toHexColor(color);
+  if (!focusColor || !loadedSvg) return;
+  heldPreviewColor = focusColor;
+  applyHeldColorPreview();
+}
+
+function endHeldColorPreview() {
+  if (!heldPreviewColor) return;
+  heldPreviewColor = null;
+  clearHeldColorPreviewStyles();
+  updatePreviewStrokeColors();
+}
+
+function updatePreviewStrokeColors() {
+  if (!loadedSvg) return;
+  const previewing = viewMode === 'strokes';
+  [...loadedSvg.querySelectorAll(shapeSelector)].forEach((el) => {
+    if (previewing) {
+      const fillHex = toHexColor(getFill(el));
+      const strokeHex = toHexColor(getStroke(el));
+      el.style.setProperty('--preview-stroke', fillHex || strokeHex || '#4f8cff');
+    } else {
+      el.style.removeProperty('--preview-stroke');
+    }
+  });
+  if (heldPreviewColor) applyHeldColorPreview();
+  else clearHeldColorPreviewStyles();
 }
 
 function renderPalette(container, colors, onClick) {
@@ -582,6 +768,10 @@ function renderPalette(container, colors, onClick) {
     swatch.dataset.color = color;
     swatch.title = color;
     swatch.addEventListener('click', () => onClick(color));
+    swatch.addEventListener('pointerdown', () => beginHeldColorPreview(color));
+    swatch.addEventListener('pointerup', endHeldColorPreview);
+    swatch.addEventListener('pointercancel', endHeldColorPreview);
+    swatch.addEventListener('pointerleave', endHeldColorPreview);
     container.appendChild(swatch);
   });
 }
@@ -591,6 +781,14 @@ function renderSwatchSelection(container, color) {
   [...container.querySelectorAll('.swatch')].forEach((swatch) => {
     swatch.classList.toggle('active', swatch.dataset.color === color);
   });
+}
+
+function bindColorInputHoldPreview(inputEl, getColor) {
+  if (!inputEl || typeof getColor !== 'function') return;
+  inputEl.addEventListener('pointerdown', () => beginHeldColorPreview(getColor()));
+  inputEl.addEventListener('pointerup', endHeldColorPreview);
+  inputEl.addEventListener('pointercancel', endHeldColorPreview);
+  inputEl.addEventListener('pointerleave', endHeldColorPreview);
 }
 
 function setMode(nextMode) {
@@ -607,6 +805,7 @@ function applyZoom() {
   const radius = Number(brushSizeEl.value) * zoom;
   brushPreview.style.width = `${radius * 2}px`;
   brushPreview.style.height = `${radius * 2}px`;
+  renderCropPreview();
 }
 
 function screenToSvg(clientX, clientY) {
@@ -642,6 +841,257 @@ function boxArea(box) {
   if (!box) return 0;
   const area = box.width * box.height;
   return Number.isFinite(area) && area > 0 ? area : 0;
+}
+
+function parseAspectRatio(rawRatio) {
+  if (typeof rawRatio !== 'string') return null;
+  const [wRaw, hRaw] = rawRatio.split(':');
+  const width = Number.parseFloat(wRaw);
+  const height = Number.parseFloat(hRaw);
+  if (!(Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0)) return null;
+  return width / height;
+}
+
+function parsePreserveAspectRatioValue(rawValue) {
+  const defaults = {
+    align: 'xMidYMid',
+    meetOrSlice: 'meet',
+    none: false
+  };
+  if (typeof rawValue !== 'string' || rawValue.trim() === '') return defaults;
+
+  const tokens = rawValue.trim().split(/\s+/i).filter(Boolean);
+  const cleaned = tokens[0] === 'defer' ? tokens.slice(1) : tokens;
+  if (cleaned.length === 0) return defaults;
+
+  const align = cleaned[0];
+  if (align === 'none') {
+    return {
+      align: 'none',
+      meetOrSlice: 'meet',
+      none: true
+    };
+  }
+
+  const meetOrSlice = cleaned[1] === 'slice' ? 'slice' : 'meet';
+  const validAlign = /^(xMin|xMid|xMax)(YMin|YMid|YMax)$/i.test(align) ? align : defaults.align;
+  return {
+    align: validAlign,
+    meetOrSlice,
+    none: false
+  };
+}
+
+function mapSvgPointToScreen(point, viewport, svgRect, preserveAspectRatio) {
+  if (!(viewport?.width > 0 && viewport?.height > 0 && svgRect?.width > 0 && svgRect?.height > 0)) return null;
+  if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return null;
+
+  let scaleX = svgRect.width / viewport.width;
+  let scaleY = svgRect.height / viewport.height;
+  let offsetX = 0;
+  let offsetY = 0;
+
+  if (!preserveAspectRatio.none) {
+    const uniformScale = preserveAspectRatio.meetOrSlice === 'slice'
+      ? Math.max(scaleX, scaleY)
+      : Math.min(scaleX, scaleY);
+    scaleX = uniformScale;
+    scaleY = uniformScale;
+
+    const drawnWidth = viewport.width * uniformScale;
+    const drawnHeight = viewport.height * uniformScale;
+    const remainingX = svgRect.width - drawnWidth;
+    const remainingY = svgRect.height - drawnHeight;
+
+    const alignLower = preserveAspectRatio.align.toLowerCase();
+    const xAlign = alignLower.startsWith('xmin')
+      ? 0
+      : alignLower.startsWith('xmax')
+        ? 1
+        : 0.5;
+    const yAlign = alignLower.endsWith('ymin')
+      ? 0
+      : alignLower.endsWith('ymax')
+        ? 1
+        : 0.5;
+
+    offsetX = remainingX * xAlign;
+    offsetY = remainingY * yAlign;
+  }
+
+  return {
+    x: svgRect.left + offsetX + (point.x - viewport.x) * scaleX,
+    y: svgRect.top + offsetY + (point.y - viewport.y) * scaleY
+  };
+}
+
+function formatSvgNumber(value) {
+  if (!Number.isFinite(value)) return '0';
+  return String(Number(value.toFixed(3)));
+}
+
+function getContentBounds() {
+  const viewport = getSvgViewportBounds(loadedSvg);
+  const items = getShapeItems();
+  if (items.length === 0) return viewport;
+
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+
+  items.forEach((item) => {
+    const itemLeft = item.box.x;
+    const itemTop = item.box.y;
+    const itemRight = item.box.x + item.box.width;
+    const itemBottom = item.box.y + item.box.height;
+
+    const left = viewport ? Math.max(itemLeft, viewport.x) : itemLeft;
+    const top = viewport ? Math.max(itemTop, viewport.y) : itemTop;
+    const right = viewport ? Math.min(itemRight, viewport.x + viewport.width) : itemRight;
+    const bottom = viewport ? Math.min(itemBottom, viewport.y + viewport.height) : itemBottom;
+    if (!(right > left && bottom > top)) return;
+
+    minX = Math.min(minX, left);
+    minY = Math.min(minY, top);
+    maxX = Math.max(maxX, right);
+    maxY = Math.max(maxY, bottom);
+  });
+
+  if (!(Number.isFinite(minX) && Number.isFinite(minY) && Number.isFinite(maxX) && Number.isFinite(maxY))) {
+    return viewport;
+  }
+  const width = Math.max(0, maxX - minX);
+  const height = Math.max(0, maxY - minY);
+  if (!(width > 0 && height > 0)) return viewport;
+  return { x: minX, y: minY, width, height };
+}
+
+function computeCropRectFromUi() {
+  if (!loadedSvg) return null;
+  const rawPadding = Number(cropPaddingEl?.value);
+  const padding = Number.isFinite(rawPadding) && rawPadding >= 0 ? rawPadding : 0;
+  const align = cropAlignEl?.value === 'left' || cropAlignEl?.value === 'right' ? cropAlignEl.value : 'center';
+  const ratioSetting = cropRatioEl?.value || 'current';
+
+  const bounds = getContentBounds();
+  if (!bounds) return null;
+
+  let cropX = bounds.x - padding;
+  let cropY = bounds.y - padding;
+  let cropWidth = Math.max(1, bounds.width + padding * 2);
+  let cropHeight = Math.max(1, bounds.height + padding * 2);
+  const ratio = ratioSetting === 'current' ? cropWidth / cropHeight : parseAspectRatio(ratioSetting);
+  if (!(ratio > 0)) return null;
+
+  const currentRatio = cropWidth / cropHeight;
+  if (currentRatio < ratio) {
+    const nextWidth = cropHeight * ratio;
+    const delta = nextWidth - cropWidth;
+    if (align === 'right') cropX -= delta;
+    if (align === 'center') cropX -= delta / 2;
+    cropWidth = nextWidth;
+  } else if (currentRatio > ratio) {
+    const nextHeight = cropWidth / ratio;
+    const delta = nextHeight - cropHeight;
+    cropY -= delta / 2;
+    cropHeight = nextHeight;
+  }
+
+  return {
+    x: cropX,
+    y: cropY,
+    width: cropWidth,
+    height: cropHeight,
+    ratioLabel: ratioSetting === 'current' ? 'Current Aspect Ratio' : ratioSetting,
+    padding,
+    align
+  };
+}
+
+function renderCropPreview() {
+  if (!cropPreviewEl) return;
+  if (!loadedSvg) {
+    cropPreviewEl.classList.remove('active');
+    return;
+  }
+
+  const cropRect = computeCropRectFromUi();
+  if (!cropRect) {
+    cropPreviewEl.classList.remove('active');
+    return;
+  }
+
+  const viewport = getSvgViewportBounds(loadedSvg);
+  if (!viewport || !(viewport.width > 0 && viewport.height > 0)) {
+    cropPreviewEl.classList.remove('active');
+    return;
+  }
+  const svgRect = loadedSvg.getBoundingClientRect();
+  if (!(svgRect.width > 0 && svgRect.height > 0)) {
+    cropPreviewEl.classList.remove('active');
+    return;
+  }
+
+  const par = parsePreserveAspectRatioValue(loadedSvg.getAttribute('preserveAspectRatio') || '');
+  const p1 = mapSvgPointToScreen({ x: cropRect.x, y: cropRect.y }, viewport, svgRect, par);
+  const p2 = mapSvgPointToScreen(
+    { x: cropRect.x + cropRect.width, y: cropRect.y + cropRect.height },
+    viewport,
+    svgRect,
+    par
+  );
+  if (!p1 || !p2) {
+    cropPreviewEl.classList.remove('active');
+    return;
+  }
+
+  const screenLeft = Math.min(p1.x, p2.x);
+  const screenTop = Math.min(p1.y, p2.y);
+  const screenWidth = Math.max(1, Math.abs(p2.x - p1.x));
+  const screenHeight = Math.max(1, Math.abs(p2.y - p1.y));
+  const wrapRect = canvasWrap.getBoundingClientRect();
+  const left = screenLeft - wrapRect.left + canvasWrap.scrollLeft;
+  const top = screenTop - wrapRect.top + canvasWrap.scrollTop;
+
+  cropPreviewEl.style.left = `${left}px`;
+  cropPreviewEl.style.top = `${top}px`;
+  cropPreviewEl.style.width = `${screenWidth}px`;
+  cropPreviewEl.style.height = `${screenHeight}px`;
+  cropPreviewEl.classList.add('active');
+}
+
+function applyCrop() {
+  if (!loadedSvg) {
+    setStatus('Crop skipped: load an SVG first.');
+    return;
+  }
+  const cropRect = computeCropRectFromUi();
+  if (!cropRect) {
+    setStatus('Crop skipped: invalid crop settings.');
+    return;
+  }
+
+  loadedSvg.setAttribute(
+    'viewBox',
+    `${formatSvgNumber(cropRect.x)} ${formatSvgNumber(cropRect.y)} ${formatSvgNumber(cropRect.width)} ${formatSvgNumber(cropRect.height)}`
+  );
+  loadedSvg.setAttribute('width', formatSvgNumber(cropRect.width));
+  loadedSvg.setAttribute('height', formatSvgNumber(cropRect.height));
+
+  [...loadedSvg.querySelectorAll(`[${BACKGROUND_LAYER_ATTR}="1"]`)].forEach((bg) => {
+    bg.setAttribute('x', formatSvgNumber(cropRect.x));
+    bg.setAttribute('y', formatSvgNumber(cropRect.y));
+    bg.setAttribute('width', formatSvgNumber(cropRect.width));
+    bg.setAttribute('height', formatSvgNumber(cropRect.height));
+  });
+
+  applyViewMode();
+  cropPreviewEl?.classList.remove('active');
+  setStatus(
+    `Crop applied (${cropRect.ratioLabel}, padding ${Math.round(cropRect.padding)}, align ${cropRect.align}).`
+  );
+  saveUiSettings();
 }
 
 function getElementCenterInSvg(el) {
@@ -894,11 +1344,68 @@ function stripTinyInteriorSubpathsFromTouchedHosts(hostItems, maxArea) {
   return { hostsUpdated, subpathsRemoved };
 }
 
+function getShapeAtClientPoint(clientX, clientY) {
+  const hit = document.elementFromPoint(clientX, clientY);
+  if (!(hit instanceof Element)) return null;
+  const shape = hit.closest(shapeSelector);
+  if (!(shape instanceof Element)) return null;
+  if (!loadedSvg?.contains(shape)) return null;
+  if (shape.getAttribute(BACKGROUND_LAYER_ATTR) === '1') return null;
+  return shape;
+}
+
+function applyFloodFillMerge(clientX, clientY) {
+  if (!loadedSvg || fillMergeGestureDone) return;
+  const activeColor = toHexColor(selectedTargetColor || replaceColorEl.value);
+  if (!activeColor) {
+    setStatus('Fill and merge skipped: choose a working color first.');
+    fillMergeGestureDone = true;
+    return;
+  }
+
+  const hitShape = getShapeAtClientPoint(clientX, clientY);
+  if (!hitShape) {
+    setStatus('Fill and merge: click a filled shape to flood by color.');
+    fillMergeGestureDone = true;
+    return;
+  }
+
+  const sourceColor = toHexColor(getFill(hitShape));
+  if (!sourceColor) {
+    setStatus('Fill and merge: selected shape has no fill color.');
+    fillMergeGestureDone = true;
+    return;
+  }
+
+  let filled = 0;
+  if (sourceColor !== activeColor) {
+    getShapeItems().forEach((item) => {
+      if (item.fillHex !== sourceColor) return;
+      setElementFill(item.el, activeColor);
+      filled += 1;
+    });
+    buildPalette();
+  }
+
+  queueFillMerge(activeColor, filled);
+  if (sourceColor === activeColor) {
+    setStatus(`Flood merge queued for ${activeColor}.`);
+  } else {
+    setStatus(`Flood-filled ${filled} path(s) from ${sourceColor} to ${activeColor}. Merge queued for mouseup.`);
+  }
+  fillMergeGestureDone = true;
+}
+
 function applyBrush(clientX, clientY) {
   if (!loadedSvg) return;
 
   if (mode === 'openPathDel') {
     applyOpenPathDeleteBrush(clientX, clientY);
+    return;
+  }
+
+  if (fillAndMergeEl?.checked) {
+    applyFloodFillMerge(clientX, clientY);
     return;
   }
 
@@ -934,20 +1441,6 @@ function applyBrush(clientX, clientY) {
     touchedInside.push(item);
   });
 
-  if (fillAndMergeEl?.checked) {
-    let filled = 0;
-    touchedInside.forEach((item) => {
-      if (item.fillHex === activeColor) return;
-      setElementFill(item.el, activeColor);
-      filled += 1;
-    });
-    if (filled > 0) {
-      queueFillMerge(activeColor, filled);
-      setStatus(`Brush filled ${filled} path(s). Merge queued for mouseup.`);
-    }
-    return;
-  }
-
   const touchedSet = new Set(touchedInside.map((item) => item.el));
   const hostsWithTouched = touchedHosts.filter((host) => touchedInside.some((item) => itemInsideHost(host, item)));
 
@@ -980,10 +1473,15 @@ function applyOpenPathDeleteBrush(clientX, clientY) {
 
   let removed = 0;
   let strippedSubpaths = 0;
+  let strippedStroke = 0;
   items.forEach((item) => {
-    if (!elementIntersectsBrush(item, pointer, brushRadius)) return;
+    if (!circleIntersectsBox(pointer, brushRadius, item.box)) return;
     const el = item.el;
     const tag = el.tagName.toLowerCase();
+    const fillHex = toHexColor(getFill(el));
+    const strokeHex = toHexColor(getStroke(el));
+    const hasFill = Boolean(fillHex);
+    const hasStroke = Boolean(strokeHex);
 
     if (tag === 'line' || tag === 'polyline') {
       el.remove();
@@ -991,32 +1489,53 @@ function applyOpenPathDeleteBrush(clientX, clientY) {
       return;
     }
 
-    if (tag !== 'path') return;
+    if (tag !== 'path') {
+      if (hasStroke && !hasFill) {
+        el.remove();
+        removed += 1;
+      } else if (hasStroke && hasFill) {
+        removeElementStroke(el);
+        strippedStroke += 1;
+      }
+      return;
+    }
+
     const original = (el.getAttribute('d') || '').trim();
     if (!original) {
       el.remove();
       removed += 1;
       return;
     }
-    if (!pathHasOpenSubpath(original)) return;
+    if (pathHasOpenSubpath(original)) {
+      const sanitized = sanitizePathData(original);
+      if (!sanitized) {
+        el.remove();
+        removed += 1;
+        return;
+      }
+      if (sanitized !== original) {
+        el.setAttribute('d', sanitized);
+        strippedSubpaths += 1;
+      }
+    }
 
-    const sanitized = sanitizePathData(original);
-    if (!sanitized) {
+    const nowHasFill = Boolean(toHexColor(getFill(el)));
+    const nowHasStroke = Boolean(toHexColor(getStroke(el)));
+    if (nowHasStroke && !nowHasFill) {
       el.remove();
       removed += 1;
       return;
     }
-
-    if (sanitized !== original) {
-      el.setAttribute('d', sanitized);
-      strippedSubpaths += 1;
+    if (nowHasStroke && nowHasFill) {
+      removeElementStroke(el);
+      strippedStroke += 1;
     }
   });
 
-  if (removed > 0 || strippedSubpaths > 0) {
+  if (removed > 0 || strippedSubpaths > 0 || strippedStroke > 0) {
     buildPalette();
     setStatus(
-      `Open Path Del removed ${removed} open path element(s) and stripped open subpaths from ${strippedSubpaths} mixed path(s).`
+      `Delete Open Paths removed ${removed} open/stroke element(s), stripped open subpaths from ${strippedSubpaths} mixed path(s), and removed stroke from ${strippedStroke} filled path(s).`
     );
   }
 }
@@ -1242,6 +1761,19 @@ function cleanupAllOpenPathsAndStrokes() {
   return { removed, strippedStroke, rewrittenOpenSubpaths };
 }
 
+function runOpenPathCleanupAll() {
+  if (!loadedSvg) {
+    setStatus('Open Path Clean All skipped: load an SVG first.');
+    return;
+  }
+  pushHistory(snapshot());
+  const cleanup = cleanupAllOpenPathsAndStrokes();
+  buildPalette();
+  setStatus(
+    `Open Path Clean All complete. Removed ${cleanup.removed} open/stroke element(s), rewrote ${cleanup.rewrittenOpenSubpaths} mixed path(s), stripped stroke from ${cleanup.strippedStroke} filled element(s).`
+  );
+}
+
 function cleanupOpenStrokeArtifacts(maxArea = Number(speckleAreaEl.value) * 4) {
   if (!loadedSvg) return 0;
 
@@ -1304,6 +1836,138 @@ function cleanupOpenStrokeArtifacts(maxArea = Number(speckleAreaEl.value) * 4) {
   return removed;
 }
 
+function recolorFilledShapes(fromColor, toColor) {
+  if (!loadedSvg || !fromColor || !toColor) return 0;
+  let recolored = 0;
+  getShapeItems().forEach((item) => {
+    if (item.fillHex !== fromColor) return;
+    setElementFill(item.el, toColor);
+    recolored += 1;
+  });
+  return recolored;
+}
+
+async function mergeSelectedColors() {
+  if (!loadedSvg) return;
+  if (isMerging) return;
+
+  const colorA = toHexColor(mergeColorAEl?.value || mergeColorA);
+  const colorB = toHexColor(mergeColorBEl?.value || mergeColorB);
+  if (!colorA || !colorB) {
+    setStatus('Merge skipped: choose two valid colors.');
+    return;
+  }
+  if (colorA === colorB) {
+    setStatus('Merge skipped: pick two different colors.');
+    return;
+  }
+
+  mergeColorA = colorA;
+  mergeColorB = colorB;
+  isMerging = true;
+  mergeBtn.disabled = true;
+  if (mergeTwoColorsBtn) mergeTwoColorsBtn.disabled = true;
+  const undoWasDisabled = undoBtn.disabled;
+  const previousViewMode = viewMode;
+  let mergeFailed = false;
+  let recolored = 0;
+  let merged = 0;
+
+  try {
+    if (viewMode !== 'fills') {
+      viewMode = 'fills';
+      applyViewMode();
+      await waitForUiFrame();
+    }
+
+    pushHistory(snapshot());
+    recolored = recolorFilledShapes(colorB, colorA);
+    setStatus(`Merging selected colors (${colorA} + ${colorB})...`);
+    await waitForUiFrame();
+    merged = await mergeSameColorShapes([colorA]);
+  } catch {
+    mergeFailed = true;
+  } finally {
+    const cleanup = cleanupAllOpenPathsAndStrokes();
+    selectedTargetColor = colorA;
+    if (replaceColorEl) replaceColorEl.value = colorA;
+    buildPalette();
+
+    if (mergeFailed) {
+      setStatus(
+        `Two-color merge finished with errors. Recolored ${recolored} path(s), united ${merged} overlap(s), removed ${cleanup.removed} open/stroke element(s).`
+      );
+    } else {
+      setStatus(
+        `Two-color merge complete. Recolored ${recolored} path(s), united ${merged} overlap(s), removed ${cleanup.removed} open/stroke element(s).`
+      );
+    }
+
+    if (viewMode !== previousViewMode) {
+      viewMode = previousViewMode;
+      applyViewMode();
+    }
+    isMerging = false;
+    mergeBtn.disabled = false;
+    if (mergeTwoColorsBtn) mergeTwoColorsBtn.disabled = false;
+    if (!undoWasDisabled) undoBtn.disabled = false;
+    saveUiSettings();
+  }
+}
+
+function deleteSelectedBaseColor() {
+  if (!loadedSvg) {
+    setStatus('Delete skipped: load an SVG first.');
+    return;
+  }
+  if (isMerging) return;
+
+  const baseColor = toHexColor(mergeColorAEl?.value || mergeColorA);
+  if (!baseColor) {
+    setStatus('Delete skipped: pick a valid base color.');
+    return;
+  }
+
+  const targets = [...loadedSvg.querySelectorAll(shapeSelector)].filter((el) => toHexColor(getFill(el)) === baseColor);
+  if (targets.length === 0) {
+    setStatus(`Delete skipped: no shapes found with base color ${baseColor}.`);
+    return;
+  }
+
+  pushHistory(snapshot());
+  targets.forEach((el) => el.remove());
+  const cleanup = cleanupAllOpenPathsAndStrokes();
+  buildPalette();
+  setStatus(
+    `Deleted ${targets.length} shape(s) with base color ${baseColor}. Removed ${cleanup.removed} open/stroke element(s).`
+  );
+  saveUiSettings();
+}
+
+function onPathContextMenu(event) {
+  if (!loadedSvg) return;
+  if (!(event.target instanceof Element)) return;
+  const pathEl = event.target.closest('path');
+  if (!(pathEl instanceof SVGPathElement)) return;
+  if (!loadedSvg.contains(pathEl)) return;
+  event.preventDefault();
+
+  const box = getElementTransformedBox(pathEl);
+  const area = boxArea(box);
+  if (!(area > 0)) {
+    setStatus('Could not calculate selected path size.');
+    return;
+  }
+
+  const width = Math.max(0, box?.width || 0);
+  const height = Math.max(0, box?.height || 0);
+  const size = Math.max(1, Math.round(area));
+  const currentMax = Number(speckleAreaEl?.value);
+  setStatus(
+    `Path size: ${size} (bbox ${width.toFixed(1)} x ${height.toFixed(1)}). Current max: ${Number.isFinite(currentMax) ? Math.round(currentMax) : 'n/a'}.`
+  );
+}
+
 function undo() {
   const markup = history.pop();
   if (!markup) {
@@ -1317,17 +1981,24 @@ function undo() {
   loadedSvg = document.importNode(svg, true);
   loadedSvg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
   ensureSvgViewportSize(loadedSvg);
+  endHeldColorPreview();
   svgStage.innerHTML = '';
   svgStage.appendChild(loadedSvg);
   undoBtn.disabled = history.length === 0;
   buildPalette();
   applyViewMode();
+  renderCropPreview();
   setStatus(`Undo complete. Remaining steps: ${history.length}.`);
 }
 
 function downloadSvg() {
   if (!loadedSvg) return;
-  const markup = new XMLSerializer().serializeToString(loadedSvg);
+  const exportSvg = loadedSvg.cloneNode(true);
+  exportSvg.classList.remove('preview-strokes');
+  [...exportSvg.querySelectorAll(shapeSelector)].forEach((el) => {
+    el.style.removeProperty('--preview-stroke');
+  });
+  const markup = new XMLSerializer().serializeToString(exportSvg);
   const blob = new Blob([markup], { type: 'image/svg+xml;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -1351,6 +2022,7 @@ function loadSvgText(text, filename = 'uploaded.svg') {
   loadedSvg = document.importNode(svg, true);
   loadedSvg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
   ensureSvgViewportSize(loadedSvg);
+  endHeldColorPreview();
   svgStage.innerHTML = '';
   svgStage.appendChild(loadedSvg);
   loadedFilename = filename.toLowerCase().endsWith('.svg') ? filename : `${filename}.svg`;
@@ -1358,9 +2030,11 @@ function loadSvgText(text, filename = 'uploaded.svg') {
   undoBtn.disabled = true;
   downloadBtn.disabled = false;
   const background = normalizeBackgroundToViewportRect();
+  setCanvasTransparencyMode(!background.color);
   buildPalette();
   applyViewMode();
   applyZoom();
+  renderCropPreview();
   if (background.color) {
     setStatus(
       `Loaded ${loadedFilename}. Normalized background ${background.color} (${background.removed} shape(s) replaced with viewport rect).`
@@ -1396,11 +2070,13 @@ function startPan(event) {
 
 function onMouseDown(event) {
   if (!loadedSvg) return;
+  if (event.button !== 0) return;
   if (mode === 'pan' || isSpaceHeld) {
     startPan(event);
     return;
   }
   isDrawing = true;
+  fillMergeGestureDone = false;
   pushHistory(snapshot());
   applyBrush(event.clientX, event.clientY);
 }
@@ -1425,10 +2101,14 @@ canvasWrap.addEventListener('mousedown', onMouseDown);
 canvasWrap.addEventListener('mouseleave', () => {
   brushPreview.style.display = 'none';
 });
+canvasWrap.addEventListener('scroll', renderCropPreview);
+window.addEventListener('resize', renderCropPreview);
 
 document.addEventListener('mouseup', async () => {
   isDrawing = false;
   isPanning = false;
+  fillMergeGestureDone = false;
+  endHeldColorPreview();
   canvasWrap.classList.remove('panning');
   if (queuedFillMergeColor) await flushQueuedFillMerge();
 });
@@ -1465,6 +2145,19 @@ replaceColorEl.addEventListener('input', () => {
   renderSwatchSelection(targetPaletteEl, selectedTargetColor);
   saveUiSettings();
 });
+mergeColorAEl?.addEventListener('input', () => {
+  mergeColorA = mergeColorAEl.value;
+  renderSwatchSelection(mergePaletteAEl, mergeColorA);
+  saveUiSettings();
+});
+mergeColorBEl?.addEventListener('input', () => {
+  mergeColorB = mergeColorBEl.value;
+  renderSwatchSelection(mergePaletteBEl, mergeColorB);
+  saveUiSettings();
+});
+bindColorInputHoldPreview(replaceColorEl, () => replaceColorEl.value);
+bindColorInputHoldPreview(mergeColorAEl, () => mergeColorAEl?.value || mergeColorA);
+bindColorInputHoldPreview(mergeColorBEl, () => mergeColorBEl?.value || mergeColorB);
 
 canvasBgColorEl?.addEventListener('input', () => {
   applyCanvasBackground(canvasBgColorEl.value);
@@ -1479,7 +2172,22 @@ fillAndMergeEl?.addEventListener('change', () => {
   if (fillAndMergeEl.checked && deleteAllMatchingEl) deleteAllMatchingEl.checked = false;
   saveUiSettings();
 });
-speckleAreaEl?.addEventListener('input', saveUiSettings);
+speckleAreaEl?.addEventListener('input', () => {
+  renderSpeckleAreaValue();
+  saveUiSettings();
+});
+cropRatioEl?.addEventListener('change', () => {
+  saveUiSettings();
+  renderCropPreview();
+});
+cropPaddingEl?.addEventListener('input', () => {
+  saveUiSettings();
+  renderCropPreview();
+});
+cropAlignEl?.addEventListener('change', () => {
+  saveUiSettings();
+  renderCropPreview();
+});
 brushSizeEl.addEventListener('input', () => {
   applyZoom();
   saveUiSettings();
@@ -1493,22 +2201,29 @@ modeOpenPathBtn.addEventListener('click', () => {
   setMode('openPathDel');
   saveUiSettings();
 });
+openPathCleanAllBtn?.addEventListener('click', runOpenPathCleanupAll);
 modePanBtn.addEventListener('click', () => {
   setMode('pan');
   saveUiSettings();
 });
-viewFillsBtn.addEventListener('click', () => {
-  viewMode = 'fills';
-  applyViewMode();
-  saveUiSettings();
-});
-viewStrokesBtn.addEventListener('click', () => {
-  viewMode = 'strokes';
+viewToggleBtn?.addEventListener('click', () => {
+  viewMode = viewMode === 'fills' ? 'strokes' : 'fills';
   applyViewMode();
   saveUiSettings();
 });
 undoBtn.addEventListener('click', undo);
 downloadBtn.addEventListener('click', downloadSvg);
+mergeTwoColorsBtn?.addEventListener('click', mergeSelectedColors);
+deleteBaseColorBtn?.addEventListener('click', deleteSelectedBaseColor);
+applyCropBtn?.addEventListener('click', () => {
+  if (!loadedSvg) {
+    setStatus('Crop skipped: load an SVG first.');
+    return;
+  }
+  pushHistory(snapshot());
+  applyCrop();
+});
+canvasWrap.addEventListener('contextmenu', onPathContextMenu);
 
 mergeBtn.addEventListener('click', async () => {
   if (!loadedSvg) return;
@@ -1615,9 +2330,13 @@ document.addEventListener('drop', (event) => {
 });
 
 applyLoadedUiSettings();
+updateSpeckleAreaControl(Number(speckleAreaEl?.value));
 selectedTargetColor = replaceColorEl?.value || selectedTargetColor;
+mergeColorA = mergeColorAEl?.value || mergeColorA;
+mergeColorB = mergeColorBEl?.value || mergeColorB;
 setMode(mode);
 applyViewMode();
 applyZoom();
 applyCanvasBackground(canvasBgColorEl?.value || '#0a0b0f');
+renderCropPreview();
 saveUiSettings();
