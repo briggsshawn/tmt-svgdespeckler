@@ -1,8 +1,13 @@
 const fileInput = document.getElementById('fileInput');
+const stageViewportEl = document.getElementById('stageViewport');
+const stageContentEl = document.getElementById('stageContent');
 const svgStage = document.getElementById('svgStage');
 const canvasWrap = document.getElementById('canvasWrap');
-const brushPreview = document.getElementById('brushPreview');
+const emptyCanvasMessageEl = document.getElementById('emptyCanvasMessage');
 const cropPreviewEl = document.getElementById('cropPreview');
+const rotationPivotEl = document.getElementById('rotationPivot');
+const selectionMarqueeEl = document.getElementById('selectionMarquee');
+const artboardTransformEl = document.getElementById('artboardTransform');
 const dropOverlay = document.getElementById('dropOverlay');
 const statusEl = document.getElementById('status');
 const speckleAreaEl = document.getElementById('speckleArea');
@@ -11,10 +16,17 @@ const canvasBgColorEl = document.getElementById('canvasBgColor');
 const targetPaletteEl = document.getElementById('targetPalette');
 const replaceColorEl = document.getElementById('replaceColor');
 const deleteAllMatchingEl = document.getElementById('deleteAllMatching');
-const fillAndMergeEl = document.getElementById('fillAndMerge');
-const brushSizeEl = document.getElementById('brushSize');
+const cmykCEl = document.getElementById('cmykC');
+const cmykMEl = document.getElementById('cmykM');
+const cmykYEl = document.getElementById('cmykY');
+const cmykKEl = document.getElementById('cmykK');
+const cmykPreviewEl = document.getElementById('cmykPreview');
+const workingColorPreviewEl = document.getElementById('workingColorPreview');
+const applyCmykBtn = document.getElementById('applyCmykBtn');
+const modeSelectBtn = document.getElementById('modeSelectBtn');
+const modeFloodFillBtn = document.getElementById('modeFloodFillBtn');
+const modeColorSwapBtn = document.getElementById('modeColorSwapBtn');
 const modeBrushBtn = document.getElementById('modeBrushBtn');
-const modeOpenPathBtn = document.getElementById('modeOpenPathBtn');
 const openPathCleanAllBtn = document.getElementById('openPathCleanAllBtn');
 const modePanBtn = document.getElementById('modePanBtn');
 const viewToggleBtn = document.getElementById('viewToggleBtn');
@@ -24,16 +36,21 @@ const mergePaletteAEl = document.getElementById('mergePaletteA');
 const mergeColorBEl = document.getElementById('mergeColorB');
 const mergePaletteBEl = document.getElementById('mergePaletteB');
 const mergeTwoColorsBtn = document.getElementById('mergeTwoColorsBtn');
-const deleteBaseColorBtn = document.getElementById('deleteBaseColorBtn');
+const deleteCurrentColorBtn = document.getElementById('deleteCurrentColorBtn');
 const undoBtn = document.getElementById('undoBtn');
 const downloadBtn = document.getElementById('downloadBtn');
 const cropRatioEl = document.getElementById('cropRatio');
-const cropPaddingEl = document.getElementById('cropPadding');
-const cropAlignEl = document.getElementById('cropAlign');
+const cropTransformBtn = document.getElementById('cropTransformBtn');
 const applyCropBtn = document.getElementById('applyCropBtn');
 const zoomOutBtn = document.getElementById('zoomOutBtn');
 const zoomInBtn = document.getElementById('zoomInBtn');
 const zoomResetBtn = document.getElementById('zoomResetBtn');
+const zoomFitBtn = document.getElementById('zoomFitBtn');
+const rotationPopupEl = document.getElementById('rotationPopup');
+const rotationSliderEl = document.getElementById('rotationSlider');
+const rotationValueEl = document.getElementById('rotationValue');
+const rotationCancelBtn = document.getElementById('rotationCancelBtn');
+const rotationApplyBtn = document.getElementById('rotationApplyBtn');
 
 const shapeSelector = 'path,rect,circle,ellipse,polygon,polyline,line';
 const MAX_HISTORY = 25;
@@ -55,10 +72,17 @@ let viewMode = 'fills';
 let panStart = { x: 0, y: 0, scrollLeft: 0, scrollTop: 0 };
 let history = [];
 let isMerging = false;
-let queuedFillMergeColor = null;
-let queuedFillMergeCount = 0;
-let fillMergeGestureDone = false;
 let heldPreviewColor = null;
+let heldPreviewTimer = null;
+const HOLD_PREVIEW_DELAY_MS = 260;
+let artboardTransformMode = false;
+let customCropRect = null;
+let artboardTransformDrag = null;
+let selectedPaths = new Set();
+let marqueeState = null;
+let pathDragState = null;
+let rotationUiState = null;
+let statusToastTimer = null;
 
 function loadUiSettings() {
   try {
@@ -75,16 +99,12 @@ function saveUiSettings() {
   try {
     const payload = {
       speckleArea: Number(speckleAreaEl?.value),
-      brushSize: Number(brushSizeEl?.value),
       canvasBgColor: canvasBgColorEl?.value || '#0a0b0f',
       workingColor: replaceColorEl?.value || '#111111',
       mergeColorA: mergeColorAEl?.value || '#111111',
       mergeColorB: mergeColorBEl?.value || '#222222',
       deleteAllMatching: Boolean(deleteAllMatchingEl?.checked),
-      fillAndMerge: Boolean(fillAndMergeEl?.checked),
       cropRatio: cropRatioEl?.value || 'current',
-      cropPadding: Number(cropPaddingEl?.value) || 0,
-      cropAlign: cropAlignEl?.value || 'center',
       mode,
       viewMode
     };
@@ -95,7 +115,14 @@ function saveUiSettings() {
 }
 
 function setStatus(message) {
+  if (!statusEl) return;
   statusEl.textContent = message;
+  statusEl.classList.add('show');
+  if (statusToastTimer) clearTimeout(statusToastTimer);
+  statusToastTimer = setTimeout(() => {
+    statusEl.classList.remove('show');
+    statusToastTimer = null;
+  }, 2400);
 }
 
 function applyCanvasBackground(color) {
@@ -106,6 +133,134 @@ function applyCanvasBackground(color) {
 
 function setCanvasTransparencyMode(enabled) {
   canvasWrap.classList.toggle('transparent-checker', Boolean(enabled));
+}
+
+function resetCropUiControls({ persist = true, rerender = true } = {}) {
+  if (cropRatioEl) cropRatioEl.value = 'current';
+  if (rerender) renderCropPreview();
+  if (persist) saveUiSettings();
+}
+
+function updateEmptyCanvasState() {
+  const isEmpty = !loadedSvg;
+  canvasWrap?.classList.toggle('empty-state', isEmpty);
+  emptyCanvasMessageEl?.classList.toggle('hidden', !isEmpty);
+}
+
+function hideArtboardTransformOverlay() {
+  if (!artboardTransformEl) return;
+  artboardTransformEl.classList.remove('active');
+}
+
+function setArtboardTransformMode(enabled, { seedFromUi = true, rerender = true } = {}) {
+  const next = Boolean(enabled) && Boolean(loadedSvg);
+  artboardTransformMode = next;
+  if (!artboardTransformMode) {
+    customCropRect = null;
+    artboardTransformDrag = null;
+  } else if (seedFromUi || !customCropRect) {
+    customCropRect = computeCropRectFromUi() || getSvgViewportBounds(loadedSvg);
+  }
+  cropTransformBtn?.classList.toggle('active', artboardTransformMode);
+  if (!artboardTransformMode) hideArtboardTransformOverlay();
+  if (rerender) renderCropPreview();
+}
+
+function getEffectiveCropRect() {
+  if (artboardTransformMode && customCropRect) return customCropRect;
+  return computeCropRectFromUi();
+}
+
+function updateCanvasStrokeBackdrop() {
+  canvasWrap.classList.remove('strokes-bg');
+}
+
+function updateToolCursorState() {
+  if (!stageViewportEl) return;
+  stageViewportEl.classList.remove('cursor-cleanup', 'cursor-flood-fill', 'cursor-color-swap', 'cursor-select');
+  const toolActive = Boolean(loadedSvg) && !isSpaceHeld && !isPanning && mode !== 'pan';
+  if (!toolActive) return;
+  if (mode === 'brush') {
+    stageViewportEl.classList.add('cursor-cleanup');
+    return;
+  }
+  if (mode === 'floodFill') {
+    stageViewportEl.classList.add('cursor-flood-fill');
+    return;
+  }
+  if (mode === 'colorSwap') {
+    stageViewportEl.classList.add('cursor-color-swap');
+    return;
+  }
+  if (mode === 'select') {
+    stageViewportEl.classList.add('cursor-select');
+  }
+}
+
+function clampCanvasScroll() {
+  if (!stageViewportEl) return;
+  const maxLeft = Math.max(0, stageViewportEl.scrollWidth - stageViewportEl.clientWidth);
+  const maxTop = Math.max(0, stageViewportEl.scrollHeight - stageViewportEl.clientHeight);
+  if (stageViewportEl.scrollLeft < 0) stageViewportEl.scrollLeft = 0;
+  if (stageViewportEl.scrollTop < 0) stageViewportEl.scrollTop = 0;
+  if (stageViewportEl.scrollLeft > maxLeft) stageViewportEl.scrollLeft = maxLeft;
+  if (stageViewportEl.scrollTop > maxTop) stageViewportEl.scrollTop = maxTop;
+}
+
+function getAvailableCanvasSpace() {
+  const rect = stageViewportEl?.getBoundingClientRect();
+  if (!rect) return { width: 640, height: 640 };
+  return {
+    width: Math.max(1, Math.floor(rect.width - 2)),
+    height: Math.max(1, Math.floor(rect.height - 2))
+  };
+}
+
+function resizeCanvasToImage() {
+  if (!loadedSvg) {
+    canvasWrap.style.removeProperty('width');
+    canvasWrap.style.removeProperty('height');
+    stageContentEl?.style.removeProperty('width');
+    stageContentEl?.style.removeProperty('height');
+    return;
+  }
+  const viewport = getSvgViewportBounds(loadedSvg);
+  if (!viewport || !(viewport.width > 0 && viewport.height > 0)) return;
+
+  const available = getAvailableCanvasSpace();
+  const stagePadding = 32;
+  const targetWidth = Math.ceil(viewport.width * zoom) + stagePadding;
+  const targetHeight = Math.ceil(viewport.height * zoom) + stagePadding;
+  const width = Math.max(1, targetWidth);
+  const height = Math.max(1, targetHeight);
+  canvasWrap.style.width = `${width}px`;
+  canvasWrap.style.height = `${height}px`;
+  if (stageContentEl) {
+    stageContentEl.style.width = `${Math.max(available.width, width + 64)}px`;
+    stageContentEl.style.height = `${Math.max(available.height, height + 64)}px`;
+  }
+}
+
+function computeFitZoom() {
+  const viewport = getSvgViewportBounds(loadedSvg);
+  if (!viewport || !(viewport.width > 0 && viewport.height > 0)) return 1;
+  const available = getAvailableCanvasSpace();
+  const stagePadding = 32;
+  const fitX = (available.width - stagePadding) / viewport.width;
+  const fitY = (available.height - stagePadding) / viewport.height;
+  return Math.max(0.1, Math.min(6, Math.min(fitX, fitY)));
+}
+
+function fitToScreen() {
+  if (!loadedSvg) return;
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+  zoom = computeFitZoom();
+  applyZoom();
+  if (stageViewportEl) {
+    stageViewportEl.scrollLeft = 0;
+    stageViewportEl.scrollTop = 0;
+  }
+  setStatus(`Fit to screen (${Math.round(zoom * 100)}%).`);
 }
 
 function waitForUiFrame() {
@@ -119,9 +274,6 @@ function applyLoadedUiSettings() {
 
   if (Number.isFinite(settings.speckleArea) && settings.speckleArea > 0) {
     speckleAreaEl.value = String(Math.round(settings.speckleArea));
-  }
-  if (Number.isFinite(settings.brushSize) && settings.brushSize >= 2 && settings.brushSize <= 80) {
-    brushSizeEl.value = String(Math.round(settings.brushSize));
   }
   if (typeof settings.canvasBgColor === 'string') {
     const c = toHexColor(settings.canvasBgColor);
@@ -142,77 +294,21 @@ function applyLoadedUiSettings() {
   if (typeof settings.deleteAllMatching === 'boolean' && deleteAllMatchingEl) {
     deleteAllMatchingEl.checked = settings.deleteAllMatching;
   }
-  if (typeof settings.fillAndMerge === 'boolean' && fillAndMergeEl) {
-    fillAndMergeEl.checked = settings.fillAndMerge;
-  }
   if (typeof settings.cropRatio === 'string' && cropRatioEl) {
-    const allowed = new Set(['current', '1:1', '2:3', '3:2', '4:5', '5:4']);
+    const allowed = new Set(['current', 'custom', '1:1', '2:3', '3:2', '4:5', '5:4']);
     if (allowed.has(settings.cropRatio)) cropRatioEl.value = settings.cropRatio;
   }
-  if (Number.isFinite(settings.cropPadding) && settings.cropPadding >= 0 && cropPaddingEl) {
-    cropPaddingEl.value = String(Math.round(settings.cropPadding));
-  }
-  if (typeof settings.cropAlign === 'string' && cropAlignEl) {
-    const allowed = new Set(['center', 'left', 'right']);
-    if (allowed.has(settings.cropAlign)) cropAlignEl.value = settings.cropAlign;
-  }
-  if (settings.mode === 'pan' || settings.mode === 'brush' || settings.mode === 'openPathDel') {
+  if (
+    settings.mode === 'pan'
+    || settings.mode === 'brush'
+    || settings.mode === 'select'
+    || settings.mode === 'floodFill'
+    || settings.mode === 'colorSwap'
+  ) {
     mode = settings.mode;
   }
   if (settings.viewMode === 'strokes' || settings.viewMode === 'fills') {
     viewMode = settings.viewMode;
-  }
-}
-
-function queueFillMerge(color, count = 0) {
-  if (!color) return;
-  queuedFillMergeColor = color;
-  queuedFillMergeCount += Number.isFinite(count) ? count : 0;
-}
-
-async function flushQueuedFillMerge() {
-  if (!loadedSvg || !queuedFillMergeColor || isMerging) return;
-
-  const workingColor = queuedFillMergeColor;
-  const filledCount = queuedFillMergeCount;
-  queuedFillMergeColor = null;
-  queuedFillMergeCount = 0;
-
-  isMerging = true;
-  mergeBtn.disabled = true;
-  const previousViewMode = viewMode;
-  let merged = 0;
-  let mergeFailed = false;
-  try {
-    if (viewMode !== 'fills') {
-      viewMode = 'fills';
-      applyViewMode();
-      await waitForUiFrame();
-    }
-    setStatus('Fill merge started (0%).');
-    await waitForUiFrame();
-    merged = await mergeSameColorShapes([workingColor]);
-  } catch {
-    mergeFailed = true;
-  } finally {
-    const cleanup = cleanupAllOpenPathsAndStrokes();
-    buildPalette();
-    if (mergeFailed) {
-      setStatus(
-        `Fill merge finished with errors (working color ${workingColor}). Filled ${filledCount} path(s), united ${merged} overlap(s), removed ${cleanup.removed} open/stroke element(s).`
-      );
-    } else {
-      setStatus(
-        `Fill and merge complete (working color ${workingColor}). Filled ${filledCount} path(s), united ${merged} overlap(s), removed ${cleanup.removed} open/stroke element(s).`
-      );
-    }
-
-    if (viewMode !== previousViewMode) {
-      viewMode = previousViewMode;
-      applyViewMode();
-    }
-    isMerging = false;
-    mergeBtn.disabled = false;
   }
 }
 
@@ -270,6 +366,71 @@ function toHexColor(rawColor) {
     if (parsed.startsWith('rgb')) return rgbToHex(parsed);
   }
   return null;
+}
+
+function hexToRgb(hex) {
+  const normalized = toHexColor(hex);
+  if (!normalized || normalized.length < 7) return null;
+  const r = Number.parseInt(normalized.slice(1, 3), 16);
+  const g = Number.parseInt(normalized.slice(3, 5), 16);
+  const b = Number.parseInt(normalized.slice(5, 7), 16);
+  if (![r, g, b].every(Number.isFinite)) return null;
+  return { r, g, b };
+}
+
+function rgbToCmyk({ r, g, b }) {
+  const nr = clampNumber((Number(r) || 0) / 255, 0, 1);
+  const ng = clampNumber((Number(g) || 0) / 255, 0, 1);
+  const nb = clampNumber((Number(b) || 0) / 255, 0, 1);
+  const k = 1 - Math.max(nr, ng, nb);
+  if (k >= 1) return { c: 0, m: 0, y: 0, k: 100 };
+
+  const denom = 1 - k;
+  const c = ((1 - nr - k) / denom) * 100;
+  const m = ((1 - ng - k) / denom) * 100;
+  const y = ((1 - nb - k) / denom) * 100;
+  return {
+    c: Math.round(clampNumber(c, 0, 100)),
+    m: Math.round(clampNumber(m, 0, 100)),
+    y: Math.round(clampNumber(y, 0, 100)),
+    k: Math.round(clampNumber(k * 100, 0, 100))
+  };
+}
+
+function cmykToHex(c, m, y, k) {
+  const nc = clampNumber((Number(c) || 0) / 100, 0, 1);
+  const nm = clampNumber((Number(m) || 0) / 100, 0, 1);
+  const ny = clampNumber((Number(y) || 0) / 100, 0, 1);
+  const nk = clampNumber((Number(k) || 0) / 100, 0, 1);
+  const r = Math.round(255 * (1 - nc) * (1 - nk));
+  const g = Math.round(255 * (1 - nm) * (1 - nk));
+  const b = Math.round(255 * (1 - ny) * (1 - nk));
+  return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+}
+
+function updateCmykPreview() {
+  if (!cmykPreviewEl) return;
+  const color = toHexColor(cmykToHex(cmykCEl?.value, cmykMEl?.value, cmykYEl?.value, cmykKEl?.value)) || '#111111';
+  cmykPreviewEl.style.background = color;
+}
+
+function updateWorkingColorPreview() {
+  if (!workingColorPreviewEl) return;
+  const color = toHexColor(selectedTargetColor || replaceColorEl?.value) || '#111111';
+  workingColorPreviewEl.style.background = color;
+}
+
+function syncCmykControlsFromWorkingColor() {
+  if (!(cmykCEl && cmykMEl && cmykYEl && cmykKEl)) return;
+  const rgb = hexToRgb(selectedTargetColor);
+  if (!rgb) return;
+  const cmyk = rgbToCmyk(rgb);
+  cmykCEl.value = String(cmyk.c);
+  cmykMEl.value = String(cmyk.m);
+  cmykYEl.value = String(cmyk.y);
+  cmykKEl.value = String(cmyk.k);
+  updateCmykPreview();
+  updateWorkingColorPreview();
 }
 
 function getFill(el) {
@@ -645,6 +806,7 @@ function getBackgroundFillHex() {
 
 function buildPalette() {
   if (!loadedSvg) return;
+  pruneSelectedPaths();
   const unique = [...new Set(getShapeItems().map((i) => i.fillHex).filter(Boolean))].sort();
   const backgroundFillHex = getBackgroundFillHex();
   if (backgroundFillHex && !unique.includes(backgroundFillHex)) unique.push(backgroundFillHex);
@@ -669,6 +831,7 @@ function buildPalette() {
     selectedTargetColor = color;
     if (replaceColorEl) replaceColorEl.value = color;
     renderSwatchSelection(targetPaletteEl, color);
+    syncCmykControlsFromWorkingColor();
     saveUiSettings();
   });
   renderPalette(mergePaletteAEl, unique, (color) => {
@@ -687,6 +850,7 @@ function buildPalette() {
   renderSwatchSelection(targetPaletteEl, selectedTargetColor);
   renderSwatchSelection(mergePaletteAEl, mergeColorA);
   renderSwatchSelection(mergePaletteBEl, mergeColorB);
+  syncCmykControlsFromWorkingColor();
   updateSpeckleAreaControl();
   updatePreviewStrokeColors();
   renderCropPreview();
@@ -698,6 +862,7 @@ function applyViewMode() {
     viewToggleBtn.classList.toggle('active', showingStrokes);
     viewToggleBtn.textContent = showingStrokes ? 'Fill View' : 'Stroke View';
   }
+  updateCanvasStrokeBackdrop();
   if (!loadedSvg) return;
   loadedSvg.classList.toggle('preview-strokes', viewMode === 'strokes');
   updatePreviewStrokeColors();
@@ -727,14 +892,29 @@ function applyHeldColorPreview() {
   });
 }
 
-function beginHeldColorPreview(color) {
+function cancelHeldColorPreviewTimer() {
+  if (!heldPreviewTimer) return;
+  clearTimeout(heldPreviewTimer);
+  heldPreviewTimer = null;
+}
+
+function activateHeldColorPreview(color) {
   const focusColor = toHexColor(color);
   if (!focusColor || !loadedSvg) return;
   heldPreviewColor = focusColor;
   applyHeldColorPreview();
 }
 
+function beginHeldColorPreview(color) {
+  cancelHeldColorPreviewTimer();
+  heldPreviewTimer = setTimeout(() => {
+    heldPreviewTimer = null;
+    activateHeldColorPreview(color);
+  }, HOLD_PREVIEW_DELAY_MS);
+}
+
 function endHeldColorPreview() {
+  cancelHeldColorPreviewTimer();
   if (!heldPreviewColor) return;
   heldPreviewColor = null;
   clearHeldColorPreviewStyles();
@@ -793,18 +973,27 @@ function bindColorInputHoldPreview(inputEl, getColor) {
 
 function setMode(nextMode) {
   mode = nextMode;
+  if (mode !== 'select' && rotationUiState) closeRotationPopup({ apply: false });
+  if (mode !== 'select') {
+    endPathDrag();
+    clearSelectedPaths();
+    selectionMarqueeEl?.classList.remove('active');
+    marqueeState = null;
+  }
+  modeSelectBtn?.classList.toggle('active', mode === 'select');
+  modeFloodFillBtn?.classList.toggle('active', mode === 'floodFill');
+  modeColorSwapBtn?.classList.toggle('active', mode === 'colorSwap');
   modeBrushBtn.classList.toggle('active', mode === 'brush');
-  modeOpenPathBtn.classList.toggle('active', mode === 'openPathDel');
   modePanBtn.classList.toggle('active', mode === 'pan');
-  canvasWrap.classList.toggle('pan-enabled', mode === 'pan');
+  stageViewportEl?.classList.toggle('pan-enabled', mode === 'pan');
+  updateToolCursorState();
 }
 
 function applyZoom() {
   svgStage.style.transform = `scale(${zoom})`;
   zoomResetBtn.textContent = `${Math.round(zoom * 100)}%`;
-  const radius = Number(brushSizeEl.value) * zoom;
-  brushPreview.style.width = `${radius * 2}px`;
-  brushPreview.style.height = `${radius * 2}px`;
+  resizeCanvasToImage();
+  clampCanvasScroll();
   renderCropPreview();
 }
 
@@ -967,71 +1156,68 @@ function getContentBounds() {
   return { x: minX, y: minY, width, height };
 }
 
-function computeCropRectFromUi() {
-  if (!loadedSvg) return null;
-  const rawPadding = Number(cropPaddingEl?.value);
-  const padding = Number.isFinite(rawPadding) && rawPadding >= 0 ? rawPadding : 0;
-  const align = cropAlignEl?.value === 'left' || cropAlignEl?.value === 'right' ? cropAlignEl.value : 'center';
-  const ratioSetting = cropRatioEl?.value || 'current';
-
-  const bounds = getContentBounds();
-  if (!bounds) return null;
-
-  let cropX = bounds.x - padding;
-  let cropY = bounds.y - padding;
-  let cropWidth = Math.max(1, bounds.width + padding * 2);
-  let cropHeight = Math.max(1, bounds.height + padding * 2);
-  const ratio = ratioSetting === 'current' ? cropWidth / cropHeight : parseAspectRatio(ratioSetting);
-  if (!(ratio > 0)) return null;
-
-  const currentRatio = cropWidth / cropHeight;
-  if (currentRatio < ratio) {
-    const nextWidth = cropHeight * ratio;
-    const delta = nextWidth - cropWidth;
-    if (align === 'right') cropX -= delta;
-    if (align === 'center') cropX -= delta / 2;
-    cropWidth = nextWidth;
-  } else if (currentRatio > ratio) {
-    const nextHeight = cropWidth / ratio;
-    const delta = nextHeight - cropHeight;
-    cropY -= delta / 2;
-    cropHeight = nextHeight;
+function getCropRatioValue(ratioSetting, viewport = getSvgViewportBounds(loadedSvg)) {
+  if (ratioSetting === 'custom') return null;
+  if (ratioSetting === 'current') {
+    if (!(viewport?.width > 0 && viewport?.height > 0)) return null;
+    return viewport.width / viewport.height;
   }
+  return parseAspectRatio(ratioSetting);
+}
 
+function buildCenteredRect(width, height, center, viewport) {
+  if (!(viewport?.width > 0 && viewport?.height > 0)) return null;
+  const nextWidth = clampNumber(width, 1, viewport.width);
+  const nextHeight = clampNumber(height, 1, viewport.height);
+  const centerX = Number.isFinite(center?.x) ? center.x : viewport.x + viewport.width / 2;
+  const centerY = Number.isFinite(center?.y) ? center.y : viewport.y + viewport.height / 2;
   return {
-    x: cropX,
-    y: cropY,
-    width: cropWidth,
-    height: cropHeight,
-    ratioLabel: ratioSetting === 'current' ? 'Current Aspect Ratio' : ratioSetting,
-    padding,
-    align
+    x: clampNumber(centerX - nextWidth / 2, viewport.x, viewport.x + viewport.width - nextWidth),
+    y: clampNumber(centerY - nextHeight / 2, viewport.y, viewport.y + viewport.height - nextHeight),
+    width: nextWidth,
+    height: nextHeight
   };
 }
 
-function renderCropPreview() {
-  if (!cropPreviewEl) return;
-  if (!loadedSvg) {
-    cropPreviewEl.classList.remove('active');
-    return;
-  }
-
-  const cropRect = computeCropRectFromUi();
-  if (!cropRect) {
-    cropPreviewEl.classList.remove('active');
-    return;
-  }
-
+function computeCropRectFromUi() {
+  if (!loadedSvg) return null;
+  const ratioSetting = cropRatioEl?.value || 'current';
   const viewport = getSvgViewportBounds(loadedSvg);
-  if (!viewport || !(viewport.width > 0 && viewport.height > 0)) {
-    cropPreviewEl.classList.remove('active');
-    return;
+  if (!viewport) return null;
+  const bounds = getContentBounds() || viewport;
+  const center = {
+    x: bounds.x + bounds.width / 2,
+    y: bounds.y + bounds.height / 2
+  };
+  const ratio = getCropRatioValue(ratioSetting, viewport);
+
+  let rect = null;
+  if (ratio && Number.isFinite(ratio) && ratio > 0) {
+    let width = viewport.width;
+    let height = width / ratio;
+    if (height > viewport.height) {
+      height = viewport.height;
+      width = height * ratio;
+    }
+    rect = buildCenteredRect(width, height, center, viewport);
+  } else {
+    rect = buildCenteredRect(bounds.width, bounds.height, center, viewport);
   }
+  if (!rect) return null;
+  return {
+    ...rect,
+    ratioLabel: ratioSetting === 'current' ? 'Current Aspect Ratio' : ratioSetting === 'custom' ? 'Custom' : ratioSetting,
+    ratioLocked: Boolean(ratio && Number.isFinite(ratio) && ratio > 0),
+    ratio
+  };
+}
+
+function projectCropRectToCanvas(cropRect) {
+  if (!loadedSvg || !cropRect) return null;
+  const viewport = getSvgViewportBounds(loadedSvg);
+  if (!viewport || !(viewport.width > 0 && viewport.height > 0)) return null;
   const svgRect = loadedSvg.getBoundingClientRect();
-  if (!(svgRect.width > 0 && svgRect.height > 0)) {
-    cropPreviewEl.classList.remove('active');
-    return;
-  }
+  if (!(svgRect.width > 0 && svgRect.height > 0)) return null;
 
   const par = parsePreserveAspectRatioValue(loadedSvg.getAttribute('preserveAspectRatio') || '');
   const p1 = mapSvgPointToScreen({ x: cropRect.x, y: cropRect.y }, viewport, svgRect, par);
@@ -1041,24 +1227,89 @@ function renderCropPreview() {
     svgRect,
     par
   );
-  if (!p1 || !p2) {
-    cropPreviewEl.classList.remove('active');
-    return;
-  }
+  if (!p1 || !p2) return null;
 
   const screenLeft = Math.min(p1.x, p2.x);
   const screenTop = Math.min(p1.y, p2.y);
   const screenWidth = Math.max(1, Math.abs(p2.x - p1.x));
   const screenHeight = Math.max(1, Math.abs(p2.y - p1.y));
   const wrapRect = canvasWrap.getBoundingClientRect();
-  const left = screenLeft - wrapRect.left + canvasWrap.scrollLeft;
-  const top = screenTop - wrapRect.top + canvasWrap.scrollTop;
+  return {
+    left: screenLeft - wrapRect.left,
+    top: screenTop - wrapRect.top,
+    width: screenWidth,
+    height: screenHeight
+  };
+}
 
-  cropPreviewEl.style.left = `${left}px`;
-  cropPreviewEl.style.top = `${top}px`;
-  cropPreviewEl.style.width = `${screenWidth}px`;
-  cropPreviewEl.style.height = `${screenHeight}px`;
+function projectSvgPointToCanvas(point) {
+  if (!loadedSvg || !point) return null;
+  const viewport = getSvgViewportBounds(loadedSvg);
+  if (!viewport || !(viewport.width > 0 && viewport.height > 0)) return null;
+  const svgRect = loadedSvg.getBoundingClientRect();
+  if (!(svgRect.width > 0 && svgRect.height > 0)) return null;
+  const par = parsePreserveAspectRatioValue(loadedSvg.getAttribute('preserveAspectRatio') || '');
+  const mapped = mapSvgPointToScreen(point, viewport, svgRect, par);
+  if (!mapped) return null;
+  const wrapRect = canvasWrap.getBoundingClientRect();
+  return {
+    left: mapped.x - wrapRect.left,
+    top: mapped.y - wrapRect.top
+  };
+}
+
+function renderArtboardTransformOverlay(projectedRect) {
+  if (!artboardTransformEl || !projectedRect) return;
+  artboardTransformEl.style.left = `${projectedRect.left}px`;
+  artboardTransformEl.style.top = `${projectedRect.top}px`;
+  artboardTransformEl.style.width = `${projectedRect.width}px`;
+  artboardTransformEl.style.height = `${projectedRect.height}px`;
+  artboardTransformEl.classList.add('active');
+}
+
+function renderCropPreview() {
+  if (!cropPreviewEl) return;
+  if (!loadedSvg) {
+    cropPreviewEl.classList.remove('active');
+    hideArtboardTransformOverlay();
+    rotationPivotEl?.classList.remove('active');
+    return;
+  }
+
+  const cropRect = getEffectiveCropRect();
+  if (!cropRect) {
+    cropPreviewEl.classList.remove('active');
+    hideArtboardTransformOverlay();
+    rotationPivotEl?.classList.remove('active');
+    return;
+  }
+
+  const projected = projectCropRectToCanvas(cropRect);
+  if (!projected) {
+    cropPreviewEl.classList.remove('active');
+    hideArtboardTransformOverlay();
+    rotationPivotEl?.classList.remove('active');
+    return;
+  }
+
+  if (artboardTransformMode) {
+    cropPreviewEl.classList.remove('active');
+    renderArtboardTransformOverlay(projected);
+    return;
+  }
+  hideArtboardTransformOverlay();
+
+  if ((cropRatioEl?.value || 'current') === 'current') {
+    cropPreviewEl.classList.remove('active');
+    return;
+  }
+
+  cropPreviewEl.style.left = `${projected.left}px`;
+  cropPreviewEl.style.top = `${projected.top}px`;
+  cropPreviewEl.style.width = `${projected.width}px`;
+  cropPreviewEl.style.height = `${projected.height}px`;
   cropPreviewEl.classList.add('active');
+  if (rotationUiState) renderRotationPivotMarker();
 }
 
 function applyCrop() {
@@ -1066,7 +1317,7 @@ function applyCrop() {
     setStatus('Crop skipped: load an SVG first.');
     return;
   }
-  const cropRect = computeCropRectFromUi();
+  const cropRect = getEffectiveCropRect();
   if (!cropRect) {
     setStatus('Crop skipped: invalid crop settings.');
     return;
@@ -1087,11 +1338,165 @@ function applyCrop() {
   });
 
   applyViewMode();
+  resizeCanvasToImage();
+  setArtboardTransformMode(false, { rerender: false });
+  resetCropUiControls({ persist: false, rerender: false });
   cropPreviewEl?.classList.remove('active');
-  setStatus(
-    `Crop applied (${cropRect.ratioLabel}, padding ${Math.round(cropRect.padding)}, align ${cropRect.align}).`
-  );
+  const ratioLabel = cropRect.ratioLabel || 'Custom';
+  setStatus(`Crop applied (${ratioLabel}).`);
   saveUiSettings();
+}
+
+function beginArtboardTransformDrag(event) {
+  if (!artboardTransformMode || !loadedSvg || !customCropRect) return;
+  if (event.button !== 0) return;
+
+  const handleEl = event.target instanceof Element ? event.target.closest('.artboard-handle') : null;
+  const handle = handleEl?.getAttribute('data-handle') || null;
+  const pointer = screenToSvg(event.clientX, event.clientY);
+  const startRect = { ...customCropRect };
+  artboardTransformDrag = {
+    action: handle ? 'resize' : 'move',
+    handle,
+    startPointer: pointer,
+    startRect
+  };
+
+  isDrawing = false;
+  isPanning = false;
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function updateArtboardTransformDrag(event) {
+  if (!artboardTransformDrag || !loadedSvg || !customCropRect) return;
+  const pointer = screenToSvg(event.clientX, event.clientY);
+  const dx = pointer.x - artboardTransformDrag.startPointer.x;
+  const dy = pointer.y - artboardTransformDrag.startPointer.y;
+  const viewport = getSvgViewportBounds(loadedSvg);
+  const minSize = 1;
+  const ratioSetting = cropRatioEl?.value || 'current';
+  const lockedRatio = getCropRatioValue(ratioSetting, viewport);
+  const ratioLocked = Number.isFinite(lockedRatio) && lockedRatio > 0;
+  let nextRect = { ...artboardTransformDrag.startRect };
+
+  if (artboardTransformDrag.action === 'move') {
+    let x = artboardTransformDrag.startRect.x + dx;
+    let y = artboardTransformDrag.startRect.y + dy;
+    if (viewport) {
+      const maxX = viewport.x + viewport.width - artboardTransformDrag.startRect.width;
+      const maxY = viewport.y + viewport.height - artboardTransformDrag.startRect.height;
+      x = maxX >= viewport.x ? clampNumber(x, viewport.x, maxX) : viewport.x;
+      y = maxY >= viewport.y ? clampNumber(y, viewport.y, maxY) : viewport.y;
+    }
+    nextRect = {
+      x,
+      y,
+      width: artboardTransformDrag.startRect.width,
+      height: artboardTransformDrag.startRect.height
+    };
+  } else {
+    const start = artboardTransformDrag.startRect;
+    const handle = artboardTransformDrag.handle || '';
+    const centerX = start.x + start.width / 2;
+    const centerY = start.y + start.height / 2;
+
+    if (ratioLocked) {
+      const hasW = handle.includes('w');
+      const hasE = handle.includes('e');
+      const hasN = handle.includes('n');
+      const hasS = handle.includes('s');
+      const horizontalOnly = (hasW || hasE) && !hasN && !hasS;
+      const verticalOnly = (hasN || hasS) && !hasW && !hasE;
+
+      const widthFromDx = hasE ? start.width + dx : hasW ? start.width - dx : start.width;
+      const heightFromDy = hasS ? start.height + dy : hasN ? start.height - dy : start.height;
+      let width = start.width;
+      let height = start.height;
+
+      if (horizontalOnly) {
+        width = Math.max(minSize, widthFromDx);
+        height = width / lockedRatio;
+      } else if (verticalOnly) {
+        height = Math.max(minSize, heightFromDy);
+        width = height * lockedRatio;
+      } else {
+        const scaleX = widthFromDx / Math.max(minSize, start.width);
+        const scaleY = heightFromDy / Math.max(minSize, start.height);
+        let scale = Math.abs(scaleX - 1) >= Math.abs(scaleY - 1) ? scaleX : scaleY;
+        if (!Number.isFinite(scale) || scale <= 0) scale = minSize / Math.max(minSize, start.width);
+        width = Math.max(minSize, start.width * scale);
+        height = width / lockedRatio;
+      }
+
+      if (viewport) {
+        const fitScale = Math.min(1, viewport.width / width, viewport.height / height);
+        width *= fitScale;
+        height *= fitScale;
+      }
+
+      let x = start.x;
+      let y = start.y;
+      if (hasW) x = start.x + start.width - width;
+      else if (!(hasE || hasW)) x = centerX - width / 2;
+      if (hasN) y = start.y + start.height - height;
+      else if (!(hasN || hasS)) y = centerY - height / 2;
+
+      if (viewport) {
+        x = clampNumber(x, viewport.x, viewport.x + viewport.width - width);
+        y = clampNumber(y, viewport.y, viewport.y + viewport.height - height);
+      }
+
+      nextRect = { x, y, width, height };
+    } else {
+      let left = start.x;
+      let top = start.y;
+      let right = start.x + start.width;
+      let bottom = start.y + start.height;
+
+      if (handle.includes('w')) left += dx;
+      if (handle.includes('e')) right += dx;
+      if (handle.includes('n')) top += dy;
+      if (handle.includes('s')) bottom += dy;
+
+      if (viewport) {
+        left = clampNumber(left, viewport.x, viewport.x + viewport.width);
+        right = clampNumber(right, viewport.x, viewport.x + viewport.width);
+        top = clampNumber(top, viewport.y, viewport.y + viewport.height);
+        bottom = clampNumber(bottom, viewport.y, viewport.y + viewport.height);
+      }
+
+      if (right - left < minSize) {
+        if (handle.includes('w')) left = right - minSize;
+        else right = left + minSize;
+      }
+      if (bottom - top < minSize) {
+        if (handle.includes('n')) top = bottom - minSize;
+        else bottom = top + minSize;
+      }
+
+      if (viewport) {
+        left = clampNumber(left, viewport.x, viewport.x + viewport.width - minSize);
+        top = clampNumber(top, viewport.y, viewport.y + viewport.height - minSize);
+        right = clampNumber(right, left + minSize, viewport.x + viewport.width);
+        bottom = clampNumber(bottom, top + minSize, viewport.y + viewport.height);
+      }
+
+      nextRect = {
+        x: left,
+        y: top,
+        width: right - left,
+        height: bottom - top
+      };
+    }
+  }
+
+  customCropRect = nextRect;
+  renderCropPreview();
+}
+
+function endArtboardTransformDrag() {
+  artboardTransformDrag = null;
 }
 
 function getElementCenterInSvg(el) {
@@ -1354,183 +1759,572 @@ function getShapeAtClientPoint(clientX, clientY) {
   return shape;
 }
 
-function applyFloodFillMerge(clientX, clientY) {
-  if (!loadedSvg || fillMergeGestureDone) return;
+function getMovablePathAtClientPoint(clientX, clientY) {
+  const hit = document.elementFromPoint(clientX, clientY);
+  if (!(hit instanceof Element)) return null;
+  const pathEl = hit.closest('path');
+  if (!(pathEl instanceof SVGPathElement)) return null;
+  if (!loadedSvg?.contains(pathEl)) return null;
+  if (pathEl.getAttribute(BACKGROUND_LAYER_ATTR) === '1') return null;
+  return pathEl;
+}
+
+function pruneSelectedPaths() {
+  if (!loadedSvg || selectedPaths.size === 0) return;
+  const next = new Set();
+  selectedPaths.forEach((el) => {
+    if (el instanceof SVGPathElement && loadedSvg.contains(el)) next.add(el);
+    else if (el instanceof Element) el.classList.remove('selected-path');
+  });
+  selectedPaths = next;
+}
+
+function clearSelectedPaths() {
+  selectedPaths.forEach((el) => el.classList.remove('selected-path'));
+  selectedPaths.clear();
+  if (rotationUiState) closeRotationPopup({ apply: false });
+}
+
+function addSelectedPath(pathEl) {
+  if (!(pathEl instanceof SVGPathElement)) return;
+  selectedPaths.add(pathEl);
+  pathEl.classList.add('selected-path');
+}
+
+function removeSelectedPath(pathEl) {
+  if (!(pathEl instanceof SVGPathElement)) return;
+  selectedPaths.delete(pathEl);
+  pathEl.classList.remove('selected-path');
+}
+
+function setSelectedPaths(paths) {
+  clearSelectedPaths();
+  (paths || []).forEach((pathEl) => addSelectedPath(pathEl));
+}
+
+function getSelectablePaths() {
+  if (!loadedSvg) return [];
+  return [...loadedSvg.querySelectorAll('path')].filter((el) => el.getAttribute(BACKGROUND_LAYER_ATTR) !== '1');
+}
+
+function showSelectionMarquee(clientX, clientY) {
+  if (!selectionMarqueeEl) return;
+  const canvasRect = canvasWrap.getBoundingClientRect();
+  const left = Math.min(clientX, marqueeState.startClientX) - canvasRect.left;
+  const top = Math.min(clientY, marqueeState.startClientY) - canvasRect.top;
+  const width = Math.abs(clientX - marqueeState.startClientX);
+  const height = Math.abs(clientY - marqueeState.startClientY);
+  selectionMarqueeEl.style.left = `${left}px`;
+  selectionMarqueeEl.style.top = `${top}px`;
+  selectionMarqueeEl.style.width = `${Math.max(1, width)}px`;
+  selectionMarqueeEl.style.height = `${Math.max(1, height)}px`;
+  selectionMarqueeEl.classList.add('active');
+}
+
+function startMarqueeSelection(clientX, clientY, additive = false) {
+  marqueeState = {
+    startClientX: clientX,
+    startClientY: clientY,
+    currentClientX: clientX,
+    currentClientY: clientY,
+    additive
+  };
+  showSelectionMarquee(clientX, clientY);
+}
+
+function updateMarqueeSelection(clientX, clientY) {
+  if (!marqueeState) return;
+  marqueeState.currentClientX = clientX;
+  marqueeState.currentClientY = clientY;
+  showSelectionMarquee(clientX, clientY);
+}
+
+function finalizeMarqueeSelection() {
+  if (!marqueeState) return;
+  const left = Math.min(marqueeState.startClientX, marqueeState.currentClientX);
+  const right = Math.max(marqueeState.startClientX, marqueeState.currentClientX);
+  const top = Math.min(marqueeState.startClientY, marqueeState.currentClientY);
+  const bottom = Math.max(marqueeState.startClientY, marqueeState.currentClientY);
+  const add = marqueeState.additive;
+  if (!add) clearSelectedPaths();
+
+  getSelectablePaths().forEach((pathEl) => {
+    const rect = pathEl.getBoundingClientRect();
+    const overlaps = rect.right >= left && rect.left <= right && rect.bottom >= top && rect.top <= bottom;
+    if (overlaps) addSelectedPath(pathEl);
+  });
+
+  selectionMarqueeEl?.classList.remove('active');
+  marqueeState = null;
+}
+
+function startPathDrag(clientX, clientY) {
+  if (selectedPaths.size === 0) return;
+  const startPointer = screenToSvg(clientX, clientY);
+  const items = [...selectedPaths].map((pathEl) => ({
+    el: pathEl,
+    baseTransform: (pathEl.getAttribute('transform') || '').trim()
+  }));
+  pathDragState = {
+    startPointer,
+    items,
+    historyPushed: false
+  };
+}
+
+function updatePathDrag(clientX, clientY) {
+  if (!pathDragState) return;
+  const pointer = screenToSvg(clientX, clientY);
+  const dx = pointer.x - pathDragState.startPointer.x;
+  const dy = pointer.y - pathDragState.startPointer.y;
+  if (!pathDragState.historyPushed && (Math.abs(dx) > 0.001 || Math.abs(dy) > 0.001)) {
+    pushHistory(snapshot());
+    pathDragState.historyPushed = true;
+  }
+  const translate = `translate(${formatSvgNumber(dx)} ${formatSvgNumber(dy)})`;
+  pathDragState.items.forEach((item) => {
+    const nextTransform = item.baseTransform ? `${translate} ${item.baseTransform}` : translate;
+    item.el.setAttribute('transform', nextTransform);
+  });
+  renderCropPreview();
+}
+
+function endPathDrag() {
+  pathDragState = null;
+}
+
+function nudgeSelectedPaths(dx, dy) {
+  pruneSelectedPaths();
+  if (selectedPaths.size === 0) return;
+  pushHistory(snapshot());
+  selectedPaths.forEach((pathEl) => {
+    const base = (pathEl.getAttribute('transform') || '').trim();
+    const translate = `translate(${formatSvgNumber(dx)} ${formatSvgNumber(dy)})`;
+    pathEl.setAttribute('transform', base ? `${translate} ${base}` : translate);
+  });
+  renderCropPreview();
+}
+
+function deleteSelectedPaths() {
+  pruneSelectedPaths();
+  if (selectedPaths.size === 0) return;
+  pushHistory(snapshot());
+  const count = selectedPaths.size;
+  selectedPaths.forEach((pathEl) => pathEl.remove());
+  clearSelectedPaths();
+  buildPalette();
+  setStatus(`Deleted ${count} selected path(s).`);
+}
+
+function getSelectedPathsBounds() {
+  pruneSelectedPaths();
+  if (selectedPaths.size === 0) return null;
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  selectedPaths.forEach((pathEl) => {
+    const box = getElementTransformedBox(pathEl);
+    if (!box) return;
+    minX = Math.min(minX, box.x);
+    minY = Math.min(minY, box.y);
+    maxX = Math.max(maxX, box.x + box.width);
+    maxY = Math.max(maxY, box.y + box.height);
+  });
+  if (!(Number.isFinite(minX) && Number.isFinite(minY) && Number.isFinite(maxX) && Number.isFinite(maxY))) return null;
+  return { x: minX, y: minY, width: Math.max(0, maxX - minX), height: Math.max(0, maxY - minY) };
+}
+
+function setRotationPopupVisible(visible) {
+  if (!rotationPopupEl) return;
+  rotationPopupEl.classList.toggle('active', Boolean(visible));
+  rotationPopupEl.setAttribute('aria-hidden', visible ? 'false' : 'true');
+  if (!visible) rotationPivotEl?.classList.remove('active');
+}
+
+function renderRotationPivotMarker() {
+  if (!rotationPivotEl || !rotationUiState) return;
+  const projected = projectSvgPointToCanvas({ x: rotationUiState.cx, y: rotationUiState.cy });
+  if (!projected) {
+    rotationPivotEl.classList.remove('active');
+    return;
+  }
+  rotationPivotEl.style.left = `${projected.left}px`;
+  rotationPivotEl.style.top = `${projected.top}px`;
+  rotationPivotEl.classList.add('active');
+}
+
+function setRotationPivot(pointX, pointY) {
+  if (!rotationUiState) return;
+  const x = Number(pointX);
+  const y = Number(pointY);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+  if (Math.abs(rotationUiState.angle) > 0.0001) {
+    // Keep geometry fixed while changing pivot by baking current preview into base.
+    commitRotationPreviewToBase();
+  }
+  rotationUiState.cx = x;
+  rotationUiState.cy = y;
+  renderRotationPivotMarker();
+  renderCropPreview();
+}
+
+function applyRotationPreview(angle) {
+  if (!rotationUiState) return;
+  const n = Number(angle);
+  const nextAngle = Number.isFinite(n) ? n : 0;
+  rotationUiState.angle = nextAngle;
+  const rotatePart = `rotate(${formatSvgNumber(nextAngle)} ${formatSvgNumber(rotationUiState.cx)} ${formatSvgNumber(rotationUiState.cy)})`;
+  rotationUiState.items.forEach((item) => {
+    if (!(item.el instanceof SVGPathElement) || !item.el.isConnected) return;
+    if (Math.abs(nextAngle) < 0.0001) {
+      item.el.setAttribute('transform', item.baseTransform || '');
+      return;
+    }
+    item.el.setAttribute('transform', item.baseTransform ? `${item.baseTransform} ${rotatePart}` : rotatePart);
+  });
+  if (rotationValueEl) rotationValueEl.textContent = `${Math.round(nextAngle)}\u00B0`;
+  renderRotationPivotMarker();
+  renderCropPreview();
+}
+
+function getConsolidatedTransformString(el) {
+  if (!(el instanceof SVGPathElement) || !el.isConnected) return '';
+  const transformBase = el.transform?.baseVal;
+  if (!transformBase || transformBase.numberOfItems === 0) return '';
+  const consolidated = transformBase.consolidate();
+  const m = consolidated?.matrix;
+  if (!m) return '';
+  const isIdentity = (
+    Math.abs(m.a - 1) < 1e-6
+    && Math.abs(m.b) < 1e-6
+    && Math.abs(m.c) < 1e-6
+    && Math.abs(m.d - 1) < 1e-6
+    && Math.abs(m.e) < 1e-6
+    && Math.abs(m.f) < 1e-6
+  );
+  if (isIdentity) return '';
+  return `matrix(${formatSvgNumber(m.a)} ${formatSvgNumber(m.b)} ${formatSvgNumber(m.c)} ${formatSvgNumber(m.d)} ${formatSvgNumber(m.e)} ${formatSvgNumber(m.f)})`;
+}
+
+function commitRotationPreviewToBase() {
+  if (!rotationUiState) return;
+  let changed = false;
+  rotationUiState.items.forEach((item) => {
+    if (!(item.el instanceof SVGPathElement) || !item.el.isConnected) return;
+    const consolidated = getConsolidatedTransformString(item.el);
+    const next = (consolidated || '').trim();
+    const previous = (item.baseTransform || '').trim();
+    if (next !== previous) changed = true;
+    item.baseTransform = next;
+    if (next) item.el.setAttribute('transform', next);
+    else item.el.removeAttribute('transform');
+  });
+  if (changed) rotationUiState.hasCommittedPreview = true;
+  rotationUiState.angle = 0;
+  if (rotationSliderEl) rotationSliderEl.value = '0';
+  if (rotationValueEl) rotationValueEl.textContent = `0\u00B0`;
+}
+
+function normalizePathTransforms(paths) {
+  let normalized = 0;
+  (paths || []).forEach((item) => {
+    const pathEl = item?.el || item;
+    if (!(pathEl instanceof SVGPathElement) || !pathEl.isConnected) return;
+    const transformBase = pathEl.transform?.baseVal;
+    if (!transformBase || transformBase.numberOfItems === 0) {
+      pathEl.removeAttribute('transform');
+      return;
+    }
+    const consolidated = transformBase.consolidate();
+    if (!consolidated) {
+      pathEl.removeAttribute('transform');
+      return;
+    }
+    const m = consolidated.matrix;
+    if (!m) {
+      pathEl.removeAttribute('transform');
+      return;
+    }
+    const isIdentity = (
+      Math.abs(m.a - 1) < 1e-6
+      && Math.abs(m.b) < 1e-6
+      && Math.abs(m.c) < 1e-6
+      && Math.abs(m.d - 1) < 1e-6
+      && Math.abs(m.e) < 1e-6
+      && Math.abs(m.f) < 1e-6
+    );
+    if (isIdentity) {
+      pathEl.removeAttribute('transform');
+      return;
+    }
+    pathEl.setAttribute(
+      'transform',
+      `matrix(${formatSvgNumber(m.a)} ${formatSvgNumber(m.b)} ${formatSvgNumber(m.c)} ${formatSvgNumber(m.d)} ${formatSvgNumber(m.e)} ${formatSvgNumber(m.f)})`
+    );
+    normalized += 1;
+  });
+  return normalized;
+}
+
+function closeRotationPopup({ apply = false } = {}) {
+  if (!rotationUiState) {
+    setRotationPopupVisible(false);
+    return;
+  }
+  const state = rotationUiState;
+  if (apply) {
+    if (Math.abs(state.angle) > 0.0001 || state.hasCommittedPreview) {
+      const normalized = normalizePathTransforms(state.items);
+      pushHistory(state.beforeMarkup);
+      if (Math.abs(state.angle) > 0.0001) {
+        setStatus(`Rotated ${state.items.length} selected path(s) by ${Math.round(state.angle)} degrees (normalized ${normalized}).`);
+      } else {
+        setStatus(`Rotation applied to ${state.items.length} selected path(s) (normalized ${normalized}).`);
+      }
+    } else {
+      state.items.forEach((item) => {
+        if (!(item.el instanceof SVGPathElement) || !item.el.isConnected) return;
+        item.el.setAttribute('transform', item.baseTransform || '');
+      });
+      setStatus('Rotate canceled: no angle change.');
+    }
+  } else {
+    state.items.forEach((item) => {
+      if (!(item.el instanceof SVGPathElement) || !item.el.isConnected) return;
+      if (item.originalTransform) item.el.setAttribute('transform', item.originalTransform);
+      else item.el.removeAttribute('transform');
+    });
+  }
+  rotationUiState = null;
+  if (rotationSliderEl) rotationSliderEl.value = '0';
+  if (rotationValueEl) rotationValueEl.textContent = `0\u00B0`;
+  setRotationPopupVisible(false);
+  renderCropPreview();
+}
+
+function openRotationPopupForSelection(pivotPathEl = null) {
+  pruneSelectedPaths();
+  if (selectedPaths.size === 0) return;
+  const bounds = getSelectedPathsBounds();
+  if (!bounds || !(bounds.width > 0 || bounds.height > 0)) return;
+  const pivotFromPath = pivotPathEl ? getElementCenterInSvg(pivotPathEl) : null;
+  const items = [...selectedPaths].map((el) => ({
+    el,
+    originalTransform: (el.getAttribute('transform') || '').trim(),
+    baseTransform: (el.getAttribute('transform') || '').trim()
+  }));
+  rotationUiState = {
+    items,
+    cx: Number.isFinite(pivotFromPath?.x) ? pivotFromPath.x : bounds.x + bounds.width / 2,
+    cy: Number.isFinite(pivotFromPath?.y) ? pivotFromPath.y : bounds.y + bounds.height / 2,
+    angle: 0,
+    hasCommittedPreview: false,
+    beforeMarkup: snapshot()
+  };
+  if (rotationSliderEl) rotationSliderEl.value = '0';
+  if (rotationValueEl) rotationValueEl.textContent = `0\u00B0`;
+  applyRotationPreview(0);
+  setRotationPopupVisible(true);
+  setStatus('Rotation mode: move slider for live preview, click canvas to set pivot, then Apply.');
+}
+
+function onSelectDoubleClick(event) {
+  if (!loadedSvg || mode !== 'select') return;
+  const hitPath = getMovablePathAtClientPoint(event.clientX, event.clientY);
+  if (!hitPath) return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (!selectedPaths.has(hitPath)) setSelectedPaths([hitPath]);
+  openRotationPopupForSelection(hitPath);
+}
+
+async function mergeTargetColorAfterEdit(targetColor) {
+  if (!loadedSvg || !targetColor || isMerging) return { merged: 0, cleanup: { removed: 0 } };
+  isMerging = true;
+  let merged = 0;
+  let cleanup = { removed: 0 };
+  try {
+    await waitForUiFrame();
+    merged = await mergeSameColorShapes([targetColor]);
+  } catch {
+    // Keep edits even if merge fails.
+  } finally {
+    cleanup = cleanupAllOpenPathsAndStrokes();
+    isMerging = false;
+  }
+  return { merged, cleanup };
+}
+
+async function applyFloodFill(clientX, clientY) {
+  if (!loadedSvg) return;
   const activeColor = toHexColor(selectedTargetColor || replaceColorEl.value);
   if (!activeColor) {
-    setStatus('Fill and merge skipped: choose a working color first.');
-    fillMergeGestureDone = true;
+    setStatus('Flood Fill skipped: choose a working color first.');
     return;
   }
 
   const hitShape = getShapeAtClientPoint(clientX, clientY);
   if (!hitShape) {
-    setStatus('Fill and merge: click a filled shape to flood by color.');
-    fillMergeGestureDone = true;
+    setStatus('Flood Fill: click a filled shape.');
     return;
   }
 
   const sourceColor = toHexColor(getFill(hitShape));
   if (!sourceColor) {
-    setStatus('Fill and merge: selected shape has no fill color.');
-    fillMergeGestureDone = true;
+    setStatus('Flood Fill: selected shape has no fill color.');
     return;
   }
 
-  let filled = 0;
   if (sourceColor !== activeColor) {
-    getShapeItems().forEach((item) => {
-      if (item.fillHex !== sourceColor) return;
-      setElementFill(item.el, activeColor);
-      filled += 1;
-    });
+    pushHistory(snapshot());
+    setElementFill(hitShape, activeColor);
+    setStatus(`Flood Fill updated clicked shape from ${sourceColor} to ${activeColor}. Merging...`);
+    const mergeResult = await mergeTargetColorAfterEdit(activeColor);
     buildPalette();
+    setStatus(
+      `Flood Fill updated clicked shape from ${sourceColor} to ${activeColor}; merged ${mergeResult.merged} overlap(s), cleaned ${mergeResult.cleanup.removed} open/stroke artifact(s).`
+    );
+  } else {
+    setStatus(`Flood Fill: clicked shape already matches ${activeColor}.`);
+  }
+}
+
+async function applyColorSwapAll(clientX, clientY) {
+  if (!loadedSvg || isMerging) return;
+  const activeColor = toHexColor(selectedTargetColor || replaceColorEl.value);
+  if (!activeColor) {
+    setStatus('Recolor skipped: choose a working color first.');
+    return;
   }
 
-  queueFillMerge(activeColor, filled);
-  if (sourceColor === activeColor) {
-    setStatus(`Flood merge queued for ${activeColor}.`);
-  } else {
-    setStatus(`Flood-filled ${filled} path(s) from ${sourceColor} to ${activeColor}. Merge queued for mouseup.`);
+  const hitShape = getShapeAtClientPoint(clientX, clientY);
+  if (!hitShape) {
+    setStatus('Recolor skipped: click a filled shape.');
+    return;
   }
-  fillMergeGestureDone = true;
+
+  const sourceColor = toHexColor(getFill(hitShape));
+  if (!sourceColor) {
+    setStatus('Recolor skipped: selected shape has no fill color.');
+    return;
+  }
+  if (sourceColor === activeColor) {
+    setStatus(`Recolor skipped: clicked color already matches ${activeColor}.`);
+    return;
+  }
+
+  pushHistory(snapshot());
+  const recolored = recolorFilledShapes(sourceColor, activeColor);
+  setStatus(`Recolored ${recolored} matching path(s). Merging with working color ${activeColor}...`);
+  const mergeResult = await mergeTargetColorAfterEdit(activeColor);
+  buildPalette();
+  setStatus(
+    `Recolored ${recolored} matching path(s) from ${sourceColor} to ${activeColor}; merged ${mergeResult.merged} overlap(s), cleaned ${mergeResult.cleanup.removed} open/stroke artifact(s).`
+  );
 }
 
 function applyBrush(clientX, clientY) {
   if (!loadedSvg) return;
 
-  if (mode === 'openPathDel') {
-    applyOpenPathDeleteBrush(clientX, clientY);
-    return;
-  }
-
-  if (fillAndMergeEl?.checked) {
-    applyFloodFillMerge(clientX, clientY);
-    return;
-  }
-
-  const brushRadius = Number(brushSizeEl.value);
   const maxArea = Number(speckleAreaEl.value);
   if (!Number.isFinite(maxArea) || maxArea <= 0) return;
   const activeColor = toHexColor(selectedTargetColor || replaceColorEl.value);
   if (!activeColor) return;
 
-  const pointer = screenToSvg(clientX, clientY);
+  const targetEl = getShapeAtClientPoint(clientX, clientY);
+  if (!targetEl) return;
+
   const items = getShapeItems();
-  const touchedHosts = items.filter(
-    (item) => item.fillHex === activeColor && elementIntersectsBrush(item, pointer, brushRadius)
-  );
-  if (touchedHosts.length === 0) return;
+  const hostItem = items.find((item) => item.el === targetEl && item.fillHex === activeColor);
+  if (!hostItem) return;
 
   if (deleteAllMatchingEl?.checked) {
-    const toDelete = new Set(touchedHosts.map((item) => item.el));
-    toDelete.forEach((el) => el.remove());
-    if (toDelete.size > 0) {
-      buildPalette();
-      setStatus(`Brush erased ${toDelete.size} working-color path(s) touched by brush.`);
-    }
+    hostItem.el.remove();
+    buildPalette();
+    setStatus(`Flood Delete removed selected shape with working color ${activeColor}.`);
     return;
   }
 
   const touchedInside = [];
   items.forEach((item) => {
+    if (item.el === hostItem.el) return;
     if (item.area > maxArea) return;
-    if (!elementIntersectsBrush(item, pointer, brushRadius)) return;
-    const inside = touchedHosts.some((host) => itemInsideHost(host, item));
+    const inside = itemInsideHost(hostItem, item);
     if (!inside) return;
     touchedInside.push(item);
   });
 
-  const touchedSet = new Set(touchedInside.map((item) => item.el));
-  const hostsWithTouched = touchedHosts.filter((host) => touchedInside.some((item) => itemInsideHost(host, item)));
-
-  // Also remove tiny interior artifacts of any color in touched host shapes.
-  const interiorAnyColor = items.filter((item) => {
-    if (touchedSet.has(item.el)) return false;
-    if (item.area > maxArea) return false;
-    return hostsWithTouched.some((host) => itemInsideHost(host, item));
-  });
-
-  const toDelete = new Set([...touchedInside.map((item) => item.el), ...interiorAnyColor.map((item) => item.el)]);
+  const toDelete = new Set(touchedInside.map((item) => item.el));
   toDelete.forEach((el) => {
     el.remove();
   });
 
-  const subpathCleanup = stripTinyInteriorSubpathsFromTouchedHosts(touchedHosts, maxArea);
+  const subpathCleanup = stripTinyInteriorSubpathsFromTouchedHosts([hostItem], maxArea);
   if (toDelete.size > 0 || subpathCleanup.subpathsRemoved > 0) {
     buildPalette();
     setStatus(
-      `Brush erased ${touchedInside.length} touched speckle(s), ${interiorAnyColor.length} interior artifact(s), and stripped ${subpathCleanup.subpathsRemoved} tiny interior subpath(s) across ${subpathCleanup.hostsUpdated} touched host path(s).`
+      `Removed ${touchedInside.length} interior path(s) and stripped ${subpathCleanup.subpathsRemoved} tiny interior subpath(s) in ${subpathCleanup.hostsUpdated} host path(s).`
     );
   }
 }
 
 function applyOpenPathDeleteBrush(clientX, clientY) {
   if (!loadedSvg) return;
-  const brushRadius = Number(brushSizeEl.value);
-  const pointer = screenToSvg(clientX, clientY);
-  const items = getShapeItems({ includeZeroArea: true });
+  const targetEl = getShapeAtClientPoint(clientX, clientY);
+  if (!targetEl) return;
+  const item = getShapeItems({ includeZeroArea: true }).find((entry) => entry.el === targetEl);
+  if (!item) return;
 
   let removed = 0;
   let strippedSubpaths = 0;
   let strippedStroke = 0;
-  items.forEach((item) => {
-    if (!circleIntersectsBox(pointer, brushRadius, item.box)) return;
-    const el = item.el;
-    const tag = el.tagName.toLowerCase();
-    const fillHex = toHexColor(getFill(el));
-    const strokeHex = toHexColor(getStroke(el));
-    const hasFill = Boolean(fillHex);
-    const hasStroke = Boolean(strokeHex);
+  const el = item.el;
+  const tag = el.tagName.toLowerCase();
+  const fillHex = toHexColor(getFill(el));
+  const strokeHex = toHexColor(getStroke(el));
+  const hasFill = Boolean(fillHex);
+  const hasStroke = Boolean(strokeHex);
 
-    if (tag === 'line' || tag === 'polyline') {
+  if (tag === 'line' || tag === 'polyline') {
+    el.remove();
+    removed += 1;
+  } else if (tag !== 'path') {
+    if (hasStroke && !hasFill) {
       el.remove();
       removed += 1;
-      return;
+    } else if (hasStroke && hasFill) {
+      removeElementStroke(el);
+      strippedStroke += 1;
     }
-
-    if (tag !== 'path') {
-      if (hasStroke && !hasFill) {
-        el.remove();
-        removed += 1;
-      } else if (hasStroke && hasFill) {
-        removeElementStroke(el);
-        strippedStroke += 1;
-      }
-      return;
-    }
-
+  } else {
     const original = (el.getAttribute('d') || '').trim();
     if (!original) {
       el.remove();
       removed += 1;
-      return;
-    }
-    if (pathHasOpenSubpath(original)) {
-      const sanitized = sanitizePathData(original);
-      if (!sanitized) {
+    } else {
+      if (pathHasOpenSubpath(original)) {
+        const sanitized = sanitizePathData(original);
+        if (!sanitized) {
+          el.remove();
+          removed += 1;
+        } else if (sanitized !== original) {
+          el.setAttribute('d', sanitized);
+          strippedSubpaths += 1;
+        }
+      }
+
+      const nowHasFill = Boolean(toHexColor(getFill(el)));
+      const nowHasStroke = Boolean(toHexColor(getStroke(el)));
+      if (nowHasStroke && !nowHasFill) {
         el.remove();
         removed += 1;
-        return;
-      }
-      if (sanitized !== original) {
-        el.setAttribute('d', sanitized);
-        strippedSubpaths += 1;
+      } else if (nowHasStroke && nowHasFill) {
+        removeElementStroke(el);
+        strippedStroke += 1;
       }
     }
-
-    const nowHasFill = Boolean(toHexColor(getFill(el)));
-    const nowHasStroke = Boolean(toHexColor(getStroke(el)));
-    if (nowHasStroke && !nowHasFill) {
-      el.remove();
-      removed += 1;
-      return;
-    }
-    if (nowHasStroke && nowHasFill) {
-      removeElementStroke(el);
-      strippedStroke += 1;
-    }
-  });
+  }
 
   if (removed > 0 || strippedSubpaths > 0 || strippedStroke > 0) {
     buildPalette();
@@ -1763,14 +2557,14 @@ function cleanupAllOpenPathsAndStrokes() {
 
 function runOpenPathCleanupAll() {
   if (!loadedSvg) {
-    setStatus('Open Path Clean All skipped: load an SVG first.');
+    setStatus('Remove all open paths skipped: load an SVG first.');
     return;
   }
   pushHistory(snapshot());
   const cleanup = cleanupAllOpenPathsAndStrokes();
   buildPalette();
   setStatus(
-    `Open Path Clean All complete. Removed ${cleanup.removed} open/stroke element(s), rewrote ${cleanup.rewrittenOpenSubpaths} mixed path(s), stripped stroke from ${cleanup.strippedStroke} filled element(s).`
+    `Remove all open paths complete. Removed ${cleanup.removed} open/stroke element(s), rewrote ${cleanup.rewrittenOpenSubpaths} mixed path(s), stripped stroke from ${cleanup.strippedStroke} filled element(s).`
   );
 }
 
@@ -1845,6 +2639,40 @@ function recolorFilledShapes(fromColor, toColor) {
     recolored += 1;
   });
   return recolored;
+}
+
+function applyCmykToWorkingColor() {
+  if (!loadedSvg) {
+    setStatus('CMYK apply skipped: load an SVG first.');
+    return;
+  }
+  const sourceColor = toHexColor(selectedTargetColor || replaceColorEl?.value);
+  if (!sourceColor) {
+    setStatus('CMYK apply skipped: pick a working color first.');
+    return;
+  }
+  const nextColor = toHexColor(cmykToHex(cmykCEl?.value, cmykMEl?.value, cmykYEl?.value, cmykKEl?.value));
+  if (!nextColor) {
+    setStatus('CMYK apply skipped: invalid CMYK values.');
+    return;
+  }
+  if (nextColor === sourceColor) {
+    setStatus(`CMYK apply skipped: working color already ${sourceColor}.`);
+    return;
+  }
+
+  pushHistory(snapshot());
+  let recolored = 0;
+  [...loadedSvg.querySelectorAll('path')].forEach((pathEl) => {
+    if (toHexColor(getFill(pathEl)) !== sourceColor) return;
+    setElementFill(pathEl, nextColor);
+    recolored += 1;
+  });
+  selectedTargetColor = nextColor;
+  if (replaceColorEl) replaceColorEl.value = nextColor;
+  buildPalette();
+  setStatus(`CMYK applied: recolored ${recolored} path(s) from ${sourceColor} to ${nextColor}.`);
+  saveUiSettings();
 }
 
 async function mergeSelectedColors() {
@@ -1922,15 +2750,15 @@ function deleteSelectedBaseColor() {
   }
   if (isMerging) return;
 
-  const baseColor = toHexColor(mergeColorAEl?.value || mergeColorA);
+  const baseColor = toHexColor(selectedTargetColor || replaceColorEl?.value);
   if (!baseColor) {
-    setStatus('Delete skipped: pick a valid base color.');
+    setStatus('Delete skipped: pick a valid current color.');
     return;
   }
 
   const targets = [...loadedSvg.querySelectorAll(shapeSelector)].filter((el) => toHexColor(getFill(el)) === baseColor);
   if (targets.length === 0) {
-    setStatus(`Delete skipped: no shapes found with base color ${baseColor}.`);
+    setStatus(`Delete skipped: no shapes found with current color ${baseColor}.`);
     return;
   }
 
@@ -1939,7 +2767,7 @@ function deleteSelectedBaseColor() {
   const cleanup = cleanupAllOpenPathsAndStrokes();
   buildPalette();
   setStatus(
-    `Deleted ${targets.length} shape(s) with base color ${baseColor}. Removed ${cleanup.removed} open/stroke element(s).`
+    `Deleted ${targets.length} shape(s) with current color ${baseColor}. Removed ${cleanup.removed} open/stroke element(s).`
   );
   saveUiSettings();
 }
@@ -1982,11 +2810,16 @@ function undo() {
   loadedSvg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
   ensureSvgViewportSize(loadedSvg);
   endHeldColorPreview();
+  setArtboardTransformMode(false, { rerender: false });
+  clearSelectedPaths();
+  updateEmptyCanvasState();
   svgStage.innerHTML = '';
   svgStage.appendChild(loadedSvg);
   undoBtn.disabled = history.length === 0;
   buildPalette();
   applyViewMode();
+  applyZoom();
+  updateToolCursorState();
   renderCropPreview();
   setStatus(`Undo complete. Remaining steps: ${history.length}.`);
 }
@@ -2023,6 +2856,9 @@ function loadSvgText(text, filename = 'uploaded.svg') {
   loadedSvg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
   ensureSvgViewportSize(loadedSvg);
   endHeldColorPreview();
+  setArtboardTransformMode(false, { rerender: false });
+  clearSelectedPaths();
+  updateEmptyCanvasState();
   svgStage.innerHTML = '';
   svgStage.appendChild(loadedSvg);
   loadedFilename = filename.toLowerCase().endsWith('.svg') ? filename : `${filename}.svg`;
@@ -2031,9 +2867,11 @@ function loadSvgText(text, filename = 'uploaded.svg') {
   downloadBtn.disabled = false;
   const background = normalizeBackgroundToViewportRect();
   setCanvasTransparencyMode(!background.color);
+  resetCropUiControls({ persist: false, rerender: false });
   buildPalette();
   applyViewMode();
   applyZoom();
+  updateToolCursorState();
   renderCropPreview();
   if (background.color) {
     setStatus(
@@ -2051,20 +2889,15 @@ function handleFile(file) {
     .catch(() => setStatus('Could not read file.'));
 }
 
-function updateBrushCursor(event) {
-  const rect = canvasWrap.getBoundingClientRect();
-  brushPreview.style.left = `${event.clientX - rect.left + canvasWrap.scrollLeft}px`;
-  brushPreview.style.top = `${event.clientY - rect.top + canvasWrap.scrollTop}px`;
-}
-
 function startPan(event) {
   isPanning = true;
-  canvasWrap.classList.add('panning');
+  stageViewportEl?.classList.add('panning');
+  updateToolCursorState();
   panStart = {
     x: event.clientX,
     y: event.clientY,
-    scrollLeft: canvasWrap.scrollLeft,
-    scrollTop: canvasWrap.scrollTop
+    scrollLeft: stageViewportEl?.scrollLeft || 0,
+    scrollTop: stageViewportEl?.scrollTop || 0
   };
 }
 
@@ -2075,61 +2908,173 @@ function onMouseDown(event) {
     startPan(event);
     return;
   }
+
+  if (rotationUiState && mode === 'select') {
+    const pivot = screenToSvg(event.clientX, event.clientY);
+    setRotationPivot(pivot.x, pivot.y);
+    event.preventDefault();
+    return;
+  }
+
+  if (mode === 'select') {
+    if (!canvasWrap.contains(event.target)) {
+      if (!event.shiftKey) clearSelectedPaths();
+      return;
+    }
+    const hitPath = getMovablePathAtClientPoint(event.clientX, event.clientY);
+    if (!hitPath) {
+      startMarqueeSelection(event.clientX, event.clientY, event.shiftKey);
+      return;
+    }
+
+    if (event.shiftKey) {
+      if (selectedPaths.has(hitPath)) removeSelectedPath(hitPath);
+      else addSelectedPath(hitPath);
+      return;
+    }
+
+    if (!selectedPaths.has(hitPath)) setSelectedPaths([hitPath]);
+    startPathDrag(event.clientX, event.clientY);
+    return;
+  }
+
+  if (mode === 'floodFill') {
+    if (!canvasWrap.contains(event.target)) return;
+    void applyFloodFill(event.clientX, event.clientY);
+    return;
+  }
+
+  if (mode === 'colorSwap') {
+    if (!canvasWrap.contains(event.target)) return;
+    void applyColorSwapAll(event.clientX, event.clientY);
+    return;
+  }
+
+  if (!canvasWrap.contains(event.target)) return;
   isDrawing = true;
-  fillMergeGestureDone = false;
   pushHistory(snapshot());
   applyBrush(event.clientX, event.clientY);
 }
 
-canvasWrap.addEventListener('mousemove', (event) => {
+stageViewportEl?.addEventListener('mousemove', (event) => {
   if (!loadedSvg) return;
-  updateBrushCursor(event);
-  brushPreview.style.display = (mode === 'brush' || mode === 'openPathDel') && !isSpaceHeld ? 'block' : 'none';
+
+  if (marqueeState) {
+    updateMarqueeSelection(event.clientX, event.clientY);
+    return;
+  }
+
+  if (pathDragState) {
+    updatePathDrag(event.clientX, event.clientY);
+    return;
+  }
 
   if (isPanning) {
     const dx = event.clientX - panStart.x;
     const dy = event.clientY - panStart.y;
-    canvasWrap.scrollLeft = panStart.scrollLeft - dx;
-    canvasWrap.scrollTop = panStart.scrollTop - dy;
+    if (stageViewportEl) {
+      stageViewportEl.scrollLeft = panStart.scrollLeft - dx;
+      stageViewportEl.scrollTop = panStart.scrollTop - dy;
+    }
+    clampCanvasScroll();
     return;
   }
 
-  if (isDrawing) applyBrush(event.clientX, event.clientY);
+  if (isDrawing && canvasWrap.contains(event.target)) applyBrush(event.clientX, event.clientY);
 });
 
-canvasWrap.addEventListener('mousedown', onMouseDown);
-canvasWrap.addEventListener('mouseleave', () => {
-  brushPreview.style.display = 'none';
+document.addEventListener('mousemove', (event) => {
+  if (artboardTransformDrag) {
+    updateArtboardTransformDrag(event);
+    return;
+  }
+  if (marqueeState) {
+    updateMarqueeSelection(event.clientX, event.clientY);
+    return;
+  }
+  if (pathDragState) updatePathDrag(event.clientX, event.clientY);
 });
-canvasWrap.addEventListener('scroll', renderCropPreview);
-window.addEventListener('resize', renderCropPreview);
 
-document.addEventListener('mouseup', async () => {
+stageViewportEl?.addEventListener('mousedown', onMouseDown);
+stageViewportEl?.addEventListener('dblclick', onSelectDoubleClick);
+artboardTransformEl?.addEventListener('mousedown', beginArtboardTransformDrag);
+stageViewportEl?.addEventListener('scroll', () => {
+  clampCanvasScroll();
+  renderCropPreview();
+});
+window.addEventListener('resize', () => {
+  resizeCanvasToImage();
+  clampCanvasScroll();
+  renderCropPreview();
+});
+
+document.addEventListener('mouseup', () => {
+  endArtboardTransformDrag();
+  if (marqueeState) finalizeMarqueeSelection();
+  endPathDrag();
   isDrawing = false;
   isPanning = false;
-  fillMergeGestureDone = false;
   endHeldColorPreview();
-  canvasWrap.classList.remove('panning');
-  if (queuedFillMergeColor) await flushQueuedFillMerge();
+  stageViewportEl?.classList.remove('panning');
+  updateToolCursorState();
 });
 
 document.addEventListener('keydown', (event) => {
-  if (event.code !== 'Space') return;
   const tag = document.activeElement?.tagName?.toLowerCase();
-  if (tag === 'input' || tag === 'textarea' || document.activeElement?.isContentEditable) return;
-  event.preventDefault();
-  isSpaceHeld = true;
-  canvasWrap.classList.add('pan-enabled');
+  const typing = tag === 'input' || tag === 'textarea' || document.activeElement?.isContentEditable;
+  if (event.key === 'Escape' && rotationUiState) {
+    event.preventDefault();
+    closeRotationPopup({ apply: false });
+    return;
+  }
+  if (event.code === 'Space') {
+    if (typing) return;
+    event.preventDefault();
+    isSpaceHeld = true;
+    stageViewportEl?.classList.add('pan-enabled');
+    updateToolCursorState();
+    return;
+  }
+
+  if (typing || mode !== 'select') return;
+  if (selectedPaths.size === 0) return;
+
+  const step = event.shiftKey ? 10 : 1;
+  if (event.key === 'ArrowUp') {
+    event.preventDefault();
+    nudgeSelectedPaths(0, -step);
+    return;
+  }
+  if (event.key === 'ArrowDown') {
+    event.preventDefault();
+    nudgeSelectedPaths(0, step);
+    return;
+  }
+  if (event.key === 'ArrowLeft') {
+    event.preventDefault();
+    nudgeSelectedPaths(-step, 0);
+    return;
+  }
+  if (event.key === 'ArrowRight') {
+    event.preventDefault();
+    nudgeSelectedPaths(step, 0);
+    return;
+  }
+  if (event.key === 'Delete' || event.key === 'Backspace') {
+    event.preventDefault();
+    deleteSelectedPaths();
+  }
 });
 
 document.addEventListener('keyup', (event) => {
   if (event.code !== 'Space') return;
   isSpaceHeld = false;
   isPanning = false;
-  canvasWrap.classList.remove('pan-enabled', 'panning');
+  stageViewportEl?.classList.remove('pan-enabled', 'panning');
+  updateToolCursorState();
 });
 
-canvasWrap.addEventListener(
+stageViewportEl?.addEventListener(
   'wheel',
   (event) => {
     if (!event.ctrlKey && !event.metaKey) return;
@@ -2143,6 +3088,7 @@ canvasWrap.addEventListener(
 replaceColorEl.addEventListener('input', () => {
   selectedTargetColor = replaceColorEl.value;
   renderSwatchSelection(targetPaletteEl, selectedTargetColor);
+  syncCmykControlsFromWorkingColor();
   saveUiSettings();
 });
 mergeColorAEl?.addEventListener('input', () => {
@@ -2158,6 +3104,7 @@ mergeColorBEl?.addEventListener('input', () => {
 bindColorInputHoldPreview(replaceColorEl, () => replaceColorEl.value);
 bindColorInputHoldPreview(mergeColorAEl, () => mergeColorAEl?.value || mergeColorA);
 bindColorInputHoldPreview(mergeColorBEl, () => mergeColorBEl?.value || mergeColorB);
+applyCmykBtn?.addEventListener('click', applyCmykToWorkingColor);
 
 canvasBgColorEl?.addEventListener('input', () => {
   applyCanvasBackground(canvasBgColorEl.value);
@@ -2165,40 +3112,60 @@ canvasBgColorEl?.addEventListener('input', () => {
 });
 
 deleteAllMatchingEl?.addEventListener('change', () => {
-  if (deleteAllMatchingEl.checked && fillAndMergeEl) fillAndMergeEl.checked = false;
   saveUiSettings();
 });
-fillAndMergeEl?.addEventListener('change', () => {
-  if (fillAndMergeEl.checked && deleteAllMatchingEl) deleteAllMatchingEl.checked = false;
-  saveUiSettings();
+const cmykControls = [cmykCEl, cmykMEl, cmykYEl, cmykKEl];
+cmykControls.forEach((el) => {
+  el?.addEventListener('input', updateCmykPreview);
+});
+rotationSliderEl?.addEventListener('input', () => {
+  applyRotationPreview(Number(rotationSliderEl.value));
+});
+rotationApplyBtn?.addEventListener('click', () => {
+  closeRotationPopup({ apply: true });
+});
+rotationCancelBtn?.addEventListener('click', () => {
+  closeRotationPopup({ apply: false });
 });
 speckleAreaEl?.addEventListener('input', () => {
   renderSpeckleAreaValue();
   saveUiSettings();
 });
+speckleAreaEl?.addEventListener(
+  'wheel',
+  (event) => {
+    if (document.activeElement !== speckleAreaEl && !speckleAreaEl.matches(':hover')) return;
+    event.preventDefault();
+    const delta = event.deltaY < 0 ? 5 : -5;
+    const min = Number(speckleAreaEl.min) || 10;
+    const max = Number(speckleAreaEl.max) || min;
+    const next = clampNumber(Number(speckleAreaEl.value) + delta, min, max);
+    speckleAreaEl.value = String(Math.round(next));
+    renderSpeckleAreaValue();
+    saveUiSettings();
+  },
+  { passive: false }
+);
 cropRatioEl?.addEventListener('change', () => {
   saveUiSettings();
-  renderCropPreview();
-});
-cropPaddingEl?.addEventListener('input', () => {
-  saveUiSettings();
-  renderCropPreview();
-});
-cropAlignEl?.addEventListener('change', () => {
-  saveUiSettings();
-  renderCropPreview();
-});
-brushSizeEl.addEventListener('input', () => {
-  applyZoom();
-  saveUiSettings();
+  if (!loadedSvg) return;
+  setArtboardTransformMode(true, { seedFromUi: true, rerender: true });
 });
 fileInput.addEventListener('change', () => handleFile(fileInput.files?.[0]));
-modeBrushBtn.addEventListener('click', () => {
-  setMode('brush');
+modeSelectBtn?.addEventListener('click', () => {
+  setMode('select');
   saveUiSettings();
 });
-modeOpenPathBtn.addEventListener('click', () => {
-  setMode('openPathDel');
+modeFloodFillBtn?.addEventListener('click', () => {
+  setMode('floodFill');
+  saveUiSettings();
+});
+modeColorSwapBtn?.addEventListener('click', () => {
+  setMode('colorSwap');
+  saveUiSettings();
+});
+modeBrushBtn.addEventListener('click', () => {
+  setMode('brush');
   saveUiSettings();
 });
 openPathCleanAllBtn?.addEventListener('click', runOpenPathCleanupAll);
@@ -2214,7 +3181,15 @@ viewToggleBtn?.addEventListener('click', () => {
 undoBtn.addEventListener('click', undo);
 downloadBtn.addEventListener('click', downloadSvg);
 mergeTwoColorsBtn?.addEventListener('click', mergeSelectedColors);
-deleteBaseColorBtn?.addEventListener('click', deleteSelectedBaseColor);
+deleteCurrentColorBtn?.addEventListener('click', deleteSelectedBaseColor);
+cropTransformBtn?.addEventListener('click', () => {
+  if (!loadedSvg) {
+    setStatus('Transform Artboard skipped: load an SVG first.');
+    return;
+  }
+  setArtboardTransformMode(!artboardTransformMode, { seedFromUi: true, rerender: true });
+  setStatus(artboardTransformMode ? 'Transform Artboard enabled.' : 'Transform Artboard disabled.');
+});
 applyCropBtn?.addEventListener('click', () => {
   if (!loadedSvg) {
     setStatus('Crop skipped: load an SVG first.');
@@ -2223,9 +3198,9 @@ applyCropBtn?.addEventListener('click', () => {
   pushHistory(snapshot());
   applyCrop();
 });
-canvasWrap.addEventListener('contextmenu', onPathContextMenu);
+stageViewportEl?.addEventListener('contextmenu', onPathContextMenu);
 
-mergeBtn.addEventListener('click', async () => {
+mergeBtn?.addEventListener('click', async () => {
   if (!loadedSvg) return;
   if (isMerging) return;
   isMerging = true;
@@ -2304,6 +3279,7 @@ zoomResetBtn.addEventListener('click', () => {
   zoom = 1;
   applyZoom();
 });
+zoomFitBtn?.addEventListener('click', fitToScreen);
 
 document.addEventListener('dragenter', (event) => {
   event.preventDefault();
@@ -2330,10 +3306,14 @@ document.addEventListener('drop', (event) => {
 });
 
 applyLoadedUiSettings();
+resetCropUiControls({ persist: false, rerender: false });
+setArtboardTransformMode(false, { rerender: false });
 updateSpeckleAreaControl(Number(speckleAreaEl?.value));
+updateEmptyCanvasState();
 selectedTargetColor = replaceColorEl?.value || selectedTargetColor;
 mergeColorA = mergeColorAEl?.value || mergeColorA;
 mergeColorB = mergeColorBEl?.value || mergeColorB;
+syncCmykControlsFromWorkingColor();
 setMode(mode);
 applyViewMode();
 applyZoom();

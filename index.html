@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
@@ -18,7 +18,7 @@
 
       <section class="group topControls">
         <div class="canvasBlock">
-          <label for="canvasBgColor">Canvas</label>
+          <label for="canvasBgColor">Canvas Background</label>
           <input id="canvasBgColor" class="color-block" type="color" value="#0a0b0f" aria-label="Canvas color" />
         </div>
       </section>
@@ -32,42 +32,42 @@
           </div>
           <label class="checkRow">
             <input id="deleteAllMatching" type="checkbox" />
-            <span>Delete all matching with brush</span>
+            <span>Flood Delete</span>
           </label>
-          <label class="checkRow">
-            <input id="fillAndMerge" type="checkbox" />
-            <span>Fill and Merge (Flood clicked color)</span>
-          </label>
+          <div class="cmykTool">
+            <label class="subLabel">CMYK Adjuster</label>
+            <div class="cmykGrid">
+              <label for="cmykC" class="subLabel">C</label>
+              <input id="cmykC" type="range" min="0" max="100" value="0" step="1" />
+              <label for="cmykM" class="subLabel">M</label>
+              <input id="cmykM" type="range" min="0" max="100" value="0" step="1" />
+              <label for="cmykY" class="subLabel">Y</label>
+              <input id="cmykY" type="range" min="0" max="100" value="0" step="1" />
+              <label for="cmykK" class="subLabel">K</label>
+              <input id="cmykK" type="range" min="0" max="100" value="0" step="1" />
+            </div>
+            <div class="cmykPreviewRow">
+              <div class="previewPair currentPreviewContainer">
+                <span class="subLabel">Current</span>
+                <div id="workingColorPreview" aria-hidden="true"></div>
+              </div>
+              <div class="previewPair">
+                <span class="subLabel">Adjusted</span>
+                <div id="cmykPreview" aria-hidden="true"></div>
+              </div>
+
+            </div>
+            <button id="applyCmykBtn" type="button">Apply CMYK to Working Color</button>
+          </div>
         </div>
       </section>
 
-      <details class="group mergeGroup">
-        <summary>Merge / Delete</summary>
-        <div class="groupBody">
-          <div class="mergePickers">
-            <div class="mergePicker">
-              <label for="mergeColorA" class="subLabel">Base Color</label>
-              <div class="colorControl">
-                <input id="mergeColorA" class="color-block" type="color" value="#111111" aria-label="Base color" />
-                <div id="mergePaletteA" class="palette"></div>
-              </div>
-            </div>
-            <div class="mergePicker">
-              <label for="mergeColorB" class="subLabel">Merge Color</label>
-              <div class="colorControl">
-                <input id="mergeColorB" class="color-block" type="color" value="#222222" aria-label="Merge color" />
-                <div id="mergePaletteB" class="palette"></div>
-              </div>
-            </div>
-          </div>
-          <button id="mergeTwoColorsBtn">Merge Selected Colors</button>
-          <button id="deleteBaseColorBtn">Delete Selected Base Color</button>
-        </div>
-      </details>
+      <section class="group">
+        <button id="deleteCurrentColorBtn">Delete all Current Color</button>
+      </section>
 
       <section class="group">
-        <label for="brushSize">Brush radius (px)</label>
-        <input id="brushSize" type="range" min="2" max="80" value="14" />
+        <label class="sectionHeader">Cleanup options</label>
       </section>
 
       <section class="group">
@@ -75,13 +75,8 @@
         <input id="speckleArea" type="range" min="10" max="500" value="90" step="1" />
       </section>
 
-      <section class="group row">
-        <button id="modeBrushBtn" class="active">Remove Small Paths</button>
-        <button id="modeOpenPathBtn">Delete Open Paths</button>
-      </section>
-
       <section class="group">
-        <button id="openPathCleanAllBtn">Open Path Clean All</button>
+        <button id="openPathCleanAllBtn">Remove all open paths</button>
       </section>
 
       <section class="group">
@@ -91,22 +86,16 @@
       <section class="group">
         <label>Crop</label>
         <div class="row stack">
+          <button id="cropTransformBtn" type="button">Transform Artboard</button>
           <label for="cropRatio" class="subLabel">Aspect ratio</label>
           <select id="cropRatio">
             <option value="current" selected>Current Aspect Ratio</option>
+            <option value="custom">Custom</option>
             <option value="1:1">1:1</option>
             <option value="2:3">2:3</option>
             <option value="3:2">3:2</option>
             <option value="4:5">4:5</option>
             <option value="5:4">5:4</option>
-          </select>
-          <label for="cropPadding" class="subLabel">Padding</label>
-          <input id="cropPadding" type="number" min="0" value="0" step="1" />
-          <label for="cropAlign" class="subLabel">Horizontal align</label>
-          <select id="cropAlign">
-            <option value="center" selected>Center</option>
-            <option value="left">Left</option>
-            <option value="right">Right</option>
           </select>
           <button id="applyCropBtn">Apply Crop</button>
         </div>
@@ -117,19 +106,57 @@
     </aside>
 
     <main class="workspace">
-      <div id="canvasWrap">
-        <div id="svgStage"></div>
-        <div id="brushPreview" aria-hidden="true"></div>
-        <div id="cropPreview" aria-hidden="true"></div>
+      <div id="stageViewport">
+        <div id="stageContent">
+          <div id="canvasWrap">
+            <div id="emptyCanvasMessage">Drop A file Here to load</div>
+            <div id="svgStage"></div>
+            <div id="cropPreview" aria-hidden="true"></div>
+            <div id="rotationPivot" aria-hidden="true"></div>
+            <div id="selectionMarquee" aria-hidden="true"></div>
+            <div id="artboardTransform" aria-hidden="true">
+              <div class="artboard-handle" data-handle="nw"></div>
+              <div class="artboard-handle" data-handle="n"></div>
+              <div class="artboard-handle" data-handle="ne"></div>
+              <div class="artboard-handle" data-handle="e"></div>
+              <div class="artboard-handle" data-handle="se"></div>
+              <div class="artboard-handle" data-handle="s"></div>
+              <div class="artboard-handle" data-handle="sw"></div>
+              <div class="artboard-handle" data-handle="w"></div>
+            </div>
+          </div>
+        </div>
       </div>
       <div id="dropOverlay" aria-hidden="true">Drop SVG to import</div>
       <div class="viewport-controls">
-        <button id="modePanBtn">Pan</button>
-        <button id="zoomOutBtn">-</button>
+        <button id="modeSelectBtn" class="iconBtn" aria-label="Select" title="Select">
+          <img src="assets/selectArrow.svg" alt="" />
+        </button>
+        <button id="modeBrushBtn" class="iconBtn" aria-label="Remove Small Paths" title="Remove Small Paths">
+          <img src="assets/deletePath.svg" alt="" />
+        </button>
+        <button id="modeFloodFillBtn" class="iconBtn" aria-label="Flood Fill" title="Flood Fill">
+          <img src="assets/paintFill.svg" alt="" />
+        </button>
+        <button id="modeColorSwapBtn" class="iconBtn" aria-label="Recolor all matching" title="Recolor all matching">
+          <img src="assets/colorSwap.svg" alt="" />
+        </button>
+        <button id="modePanBtn" class="iconBtn" aria-label="Pan" title="Pan">
+          <img src="assets/panHand.svg" alt="" />
+        </button>
         <button id="zoomResetBtn">100%</button>
+        <button id="zoomOutBtn">-</button>
+        <button id="zoomFitBtn">Fit</button>
         <button id="zoomInBtn">+</button>
-        <button id="mergeBtn">Merge Active Color</button>
         <button id="undoBtn" disabled>Undo</button>
+      </div>
+      <div id="rotationPopup" class="rotation-popup" aria-hidden="true">
+        <label for="rotationSlider">Rotate Selection <span id="rotationValue">0&deg;</span></label>
+        <input id="rotationSlider" type="range" min="-180" max="180" value="0" step="1" />
+        <div class="row">
+          <button id="rotationCancelBtn" type="button">Cancel</button>
+          <button id="rotationApplyBtn" type="button">Apply</button>
+        </div>
       </div>
     </main>
 
@@ -139,3 +166,5 @@
     <script src="app.js"></script>
   </body>
 </html>
+
+
