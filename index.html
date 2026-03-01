@@ -66,11 +66,11 @@
         <button id="deleteCurrentColorBtn">Delete all Current Color</button>
       </section>
 
-      <section class="group">
+      <section id="cleanupOptionsGroup" class="group">
         <label class="sectionHeader">Cleanup options</label>
       </section>
 
-      <section class="group">
+      <section id="speckleAreaGroup" class="group">
         <label for="speckleArea">Path max size to remove <span id="speckleAreaValue" class="inlineValue">90</span></label>
         <input id="speckleArea" type="range" min="10" max="500" value="90" step="1" />
       </section>
@@ -128,11 +128,18 @@
         </div>
       </div>
       <div id="dropOverlay" aria-hidden="true">Drop SVG to import</div>
+      <div id="despeckleHud" class="despeckle-hud" aria-hidden="true">
+        <label for="speckleAreaQuick">Path max size to remove <span id="speckleAreaQuickValue" class="inlineValue">90</span></label>
+        <input id="speckleAreaQuick" type="range" min="10" max="500" value="90" step="1" />
+      </div>
       <div class="viewport-controls">
         <button id="modeSelectBtn" class="iconBtn" aria-label="Select" title="Select">
           <img src="assets/selectArrow.svg" alt="" />
         </button>
-        <button id="modeBrushBtn" class="iconBtn" aria-label="Remove Small Paths" title="Remove Small Paths">
+        <button id="modeBrushBtn" class="iconBtn" aria-label="Despeckle" title="Despeckle">
+          <img src="assets/magicWandRepair.svg" alt="" />
+        </button>
+        <button id="modeOpenPathBtn" class="iconBtn" aria-label="Delete Path" title="Delete Path">
           <img src="assets/deletePath.svg" alt="" />
         </button>
         <button id="modeFloodFillBtn" class="iconBtn" aria-label="Flood Fill" title="Flood Fill">

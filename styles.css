@@ -31,6 +31,7 @@ body {
 
 h1 { font-size: 1.08rem; margin: 0 0 .42rem; }
 .hint { margin: 0 0 .58rem; color: var(--muted); font-size: .82rem; }
+.hidden { display: none !important; }
 .group {
   margin: 0;
   padding: .55rem 0;
@@ -379,24 +380,11 @@ input[type='color'].color-block::-moz-color-swatch {
   --bg-overlay: linear-gradient(rgba(0, 0, 0, .5), rgba(0, 0, 0, .5));
 }
 
-#stageViewport.cursor-cleanup:not(.pan-enabled):not(.panning) {
-  cursor: url("assets/deletePath.svg") 12 12, crosshair;
+#stageViewport,
+#stageViewport.pan-enabled,
+#stageViewport.panning {
+  cursor: default;
 }
-
-#stageViewport.cursor-select:not(.pan-enabled):not(.panning) {
-  cursor: url("assets/selectArrow.svg") 2 2, default;
-}
-
-#stageViewport.cursor-flood-fill:not(.pan-enabled):not(.panning) {
-  cursor: url("assets/paintFill.svg") 10 14, crosshair;
-}
-
-#stageViewport.cursor-color-swap:not(.pan-enabled):not(.panning) {
-  cursor: url("assets/colorSwap.svg") 12 12, alias;
-}
-
-#stageViewport.pan-enabled { cursor: url("assets/panHand.svg") 10 10, grab; }
-#stageViewport.panning { cursor: url("assets/panHand.svg") 10 10, grabbing; }
 
 #svgStage {
   transform-origin: 0 0;
@@ -453,7 +441,7 @@ input[type='color'].color-block::-moz-color-swatch {
   filter: none;
 }
 
-#svgStage svg .selected-path {
+#stageViewport.select-mode #svgStage svg .selected-path {
   filter: drop-shadow(0 0 2px rgba(120, 196, 255, .95)) drop-shadow(0 0 6px rgba(120, 196, 255, .6));
 }
 
@@ -568,6 +556,28 @@ input[type='color'].color-block::-moz-color-swatch {
 
 #dropOverlay.active { display: grid; }
 
+.despeckle-hud {
+  position: fixed;
+  left: calc(340px + 1.2rem);
+  bottom: 4.65rem;
+  width: min(360px, calc(100vw - 2rem));
+  display: none;
+  padding: .45rem .6rem;
+  border-radius: .6rem;
+  border: 1px solid #4a5669;
+  background: rgba(21, 24, 29, .97);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, .38);
+  z-index: 68;
+}
+
+.despeckle-hud.active {
+  display: block;
+}
+
+.despeckle-hud label {
+  margin-bottom: .25rem;
+}
+
 .viewport-controls {
   position: fixed;
   left: calc(340px + 1.2rem);
@@ -616,6 +626,15 @@ input[type='color'].color-block::-moz-color-swatch {
   height: 32px;
   object-fit: contain;
   pointer-events: none;
+}
+
+.viewport-controls .iconBtn.active {
+  background: #edf5ff;
+  border-color: #1c2d42;
+}
+
+.viewport-controls .iconBtn.active img {
+  filter: invert(1) brightness(.22);
 }
 
 .viewport-controls #zoomFitBtn {
@@ -698,6 +717,10 @@ input[type='color'].color-block::-moz-color-swatch {
   }
 
   .viewport-controls {
+    left: 1rem;
+  }
+
+  .despeckle-hud {
     left: 1rem;
   }
 
