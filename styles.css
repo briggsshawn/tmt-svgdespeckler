@@ -179,6 +179,10 @@ input[type='color'].color-block::-moz-color-swatch {
   margin-top: .2rem;
 }
 
+.cmykTool select {
+  margin-bottom: .35rem;
+}
+
 .cmykGrid {
   display: grid;
   grid-template-columns: 16px 1fr;
@@ -192,6 +196,7 @@ input[type='color'].color-block::-moz-color-swatch {
 }
 
 .cmykGrid input[type='range'] {
+  --track-gradient: linear-gradient(90deg, #f3f3f3, #1a1a1a);
   appearance: none;
   -webkit-appearance: none;
   border: 0;
@@ -203,6 +208,7 @@ input[type='color'].color-block::-moz-color-swatch {
 .cmykGrid input[type='range']::-webkit-slider-runnable-track {
   height: 10px;
   border-radius: 999px;
+  background: var(--track-gradient);
 }
 
 .cmykGrid input[type='range']::-webkit-slider-thumb {
@@ -220,6 +226,7 @@ input[type='color'].color-block::-moz-color-swatch {
   height: 10px;
   border-radius: 999px;
   border: 0;
+  background: var(--track-gradient);
 }
 
 .cmykGrid input[type='range']::-moz-range-thumb {
@@ -230,16 +237,6 @@ input[type='color'].color-block::-moz-color-swatch {
   background: #ffffff;
   box-shadow: 0 0 0 1px rgba(9, 13, 19, .45);
 }
-
-#cmykC::-webkit-slider-runnable-track { background: linear-gradient(90deg, #edf4ff, #38b8ff); }
-#cmykM::-webkit-slider-runnable-track { background: linear-gradient(90deg, #ffdff2, #ff0aa8); }
-#cmykY::-webkit-slider-runnable-track { background: linear-gradient(90deg, #fff9c7, #ffee00); }
-#cmykK::-webkit-slider-runnable-track { background: linear-gradient(90deg, #f3f3f3, #1a1a1a); }
-
-#cmykC::-moz-range-track { background: linear-gradient(90deg, #edf4ff, #38b8ff); }
-#cmykM::-moz-range-track { background: linear-gradient(90deg, #ffdff2, #ff0aa8); }
-#cmykY::-moz-range-track { background: linear-gradient(90deg, #fff9c7, #ffee00); }
-#cmykK::-moz-range-track { background: linear-gradient(90deg, #f3f3f3, #1a1a1a); }
 
 .cmykPreviewRow {
   display: flex;
@@ -355,7 +352,7 @@ input[type='color'].color-block::-moz-color-swatch {
   --bg-overlay: none;
   --checker-layer: none;
   position: relative;
-  border-radius: .85rem;
+  border-radius: 0;
   border: 1px solid rgba(170, 192, 214, .55);
   overflow: hidden;
   background-color: var(--canvas-bg);
@@ -389,7 +386,7 @@ input[type='color'].color-block::-moz-color-swatch {
 #svgStage {
   transform-origin: 0 0;
   display: inline-block;
-  padding: 1rem;
+  padding: 0;
   user-select: none;
   -webkit-user-select: none;
 }
@@ -698,6 +695,19 @@ input[type='color'].color-block::-moz-color-swatch {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
+  width: 100%;
+}
+
+.canvasBgRow {
+  display: flex;
+  align-items: center;
+  gap: .45rem;
+  width: 100%;
+}
+
+.canvasBgRow button {
+  flex: 1;
+  width: auto;
 }
 
 @media (max-width: 900px) {

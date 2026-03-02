@@ -19,7 +19,10 @@
       <section class="group topControls">
         <div class="canvasBlock">
           <label for="canvasBgColor">Canvas Background</label>
-          <input id="canvasBgColor" class="color-block" type="color" value="#0a0b0f" aria-label="Canvas color" />
+          <div class="canvasBgRow">
+            <input id="canvasBgColor" class="color-block" type="color" value="#0a0b0f" aria-label="Canvas color" />
+            <button id="restoreBackgroundBtn" type="button">Restore background color/path</button>
+          </div>
         </div>
       </section>
 
@@ -30,20 +33,21 @@
             <input id="replaceColor" class="color-block" type="color" value="#111111" aria-label="Working color" />
             <div id="targetPalette" class="palette"></div>
           </div>
-          <label class="checkRow">
-            <input id="deleteAllMatching" type="checkbox" />
-            <span>Flood Delete</span>
-          </label>
           <div class="cmykTool">
-            <label class="subLabel">CMYK Adjuster</label>
+            <label for="colorAdjustModel" class="subLabel">Color Adjuster</label>
+            <select id="colorAdjustModel" aria-label="Color adjust model">
+              <option value="hsl">HSL</option>
+              <option value="rgb">RGB</option>
+              <option value="cmyk" selected>CMYK</option>
+            </select>
             <div class="cmykGrid">
-              <label for="cmykC" class="subLabel">C</label>
+              <label id="colorChannel1Label" for="cmykC" class="subLabel">C</label>
               <input id="cmykC" type="range" min="0" max="100" value="0" step="1" />
-              <label for="cmykM" class="subLabel">M</label>
+              <label id="colorChannel2Label" for="cmykM" class="subLabel">M</label>
               <input id="cmykM" type="range" min="0" max="100" value="0" step="1" />
-              <label for="cmykY" class="subLabel">Y</label>
+              <label id="colorChannel3Label" for="cmykY" class="subLabel">Y</label>
               <input id="cmykY" type="range" min="0" max="100" value="0" step="1" />
-              <label for="cmykK" class="subLabel">K</label>
+              <label id="colorChannel4Label" for="cmykK" class="subLabel">K</label>
               <input id="cmykK" type="range" min="0" max="100" value="0" step="1" />
             </div>
             <div class="cmykPreviewRow">
@@ -57,7 +61,7 @@
               </div>
 
             </div>
-            <button id="applyCmykBtn" type="button">Apply CMYK to Working Color</button>
+            <button id="applyCmykBtn" type="button">Apply Color Change</button>
           </div>
         </div>
       </section>

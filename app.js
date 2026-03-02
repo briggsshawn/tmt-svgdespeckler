@@ -20,13 +20,17 @@ const despeckleHudEl = document.getElementById('despeckleHud');
 const canvasBgColorEl = document.getElementById('canvasBgColor');
 const targetPaletteEl = document.getElementById('targetPalette');
 const replaceColorEl = document.getElementById('replaceColor');
-const deleteAllMatchingEl = document.getElementById('deleteAllMatching');
 const cmykCEl = document.getElementById('cmykC');
 const cmykMEl = document.getElementById('cmykM');
 const cmykYEl = document.getElementById('cmykY');
 const cmykKEl = document.getElementById('cmykK');
 const cmykPreviewEl = document.getElementById('cmykPreview');
 const workingColorPreviewEl = document.getElementById('workingColorPreview');
+const colorAdjustModelEl = document.getElementById('colorAdjustModel');
+const colorChannel1LabelEl = document.getElementById('colorChannel1Label');
+const colorChannel2LabelEl = document.getElementById('colorChannel2Label');
+const colorChannel3LabelEl = document.getElementById('colorChannel3Label');
+const colorChannel4LabelEl = document.getElementById('colorChannel4Label');
 const applyCmykBtn = document.getElementById('applyCmykBtn');
 const modeSelectBtn = document.getElementById('modeSelectBtn');
 const modeFloodFillBtn = document.getElementById('modeFloodFillBtn');
@@ -43,6 +47,7 @@ const mergeColorBEl = document.getElementById('mergeColorB');
 const mergePaletteBEl = document.getElementById('mergePaletteB');
 const mergeTwoColorsBtn = document.getElementById('mergeTwoColorsBtn');
 const deleteCurrentColorBtn = document.getElementById('deleteCurrentColorBtn');
+const restoreBackgroundBtn = document.getElementById('restoreBackgroundBtn');
 const undoBtn = document.getElementById('undoBtn');
 const downloadBtn = document.getElementById('downloadBtn');
 const cropRatioEl = document.getElementById('cropRatio');
@@ -89,6 +94,8 @@ let marqueeState = null;
 let pathDragState = null;
 let rotationUiState = null;
 let statusToastTimer = null;
+let lastKnownBackgroundColor = null;
+let colorAdjustMode = 'cmyk';
 
 function loadUiSettings() {
   try {
@@ -109,8 +116,8 @@ function saveUiSettings() {
       workingColor: replaceColorEl?.value || '#111111',
       mergeColorA: mergeColorAEl?.value || '#111111',
       mergeColorB: mergeColorBEl?.value || '#222222',
-      deleteAllMatching: Boolean(deleteAllMatchingEl?.checked),
       cropRatio: cropRatioEl?.value || 'current',
+      colorAdjustMode: colorAdjustModelEl?.value || colorAdjustMode || 'cmyk',
       mode,
       viewMode
     };
@@ -225,7 +232,7 @@ function resizeCanvasToImage() {
   if (!viewport || !(viewport.width > 0 && viewport.height > 0)) return;
 
   const available = getAvailableCanvasSpace();
-  const stagePadding = 32;
+  const stagePadding = 0;
   const targetWidth = Math.ceil(viewport.width * zoom) + stagePadding;
   const targetHeight = Math.ceil(viewport.height * zoom) + stagePadding;
   const width = Math.max(1, targetWidth);
@@ -242,7 +249,7 @@ function computeFitZoom() {
   const viewport = getSvgViewportBounds(loadedSvg);
   if (!viewport || !(viewport.width > 0 && viewport.height > 0)) return 1;
   const available = getAvailableCanvasSpace();
-  const stagePadding = 32;
+  const stagePadding = 0;
   const fitX = (available.width - stagePadding) / viewport.width;
   const fitY = (available.height - stagePadding) / viewport.height;
   return Math.max(0.1, Math.min(6, Math.min(fitX, fitY)));
@@ -288,9 +295,6 @@ function applyLoadedUiSettings() {
     const c = toHexColor(settings.mergeColorB);
     if (c && mergeColorBEl) mergeColorBEl.value = c;
   }
-  if (typeof settings.deleteAllMatching === 'boolean' && deleteAllMatchingEl) {
-    deleteAllMatchingEl.checked = settings.deleteAllMatching;
-  }
   if (typeof settings.cropRatio === 'string' && cropRatioEl) {
     const allowed = new Set(['current', 'custom', '1:1', '2:3', '3:2', '4:5', '5:4']);
     if (allowed.has(settings.cropRatio)) cropRatioEl.value = settings.cropRatio;
@@ -307,6 +311,12 @@ function applyLoadedUiSettings() {
   }
   if (settings.viewMode === 'strokes' || settings.viewMode === 'fills') {
     viewMode = settings.viewMode;
+  }
+  if (settings.colorAdjustMode === 'hsl' || settings.colorAdjustMode === 'rgb' || settings.colorAdjustMode === 'cmyk') {
+    colorAdjustMode = settings.colorAdjustMode;
+    if (colorAdjustModelEl) colorAdjustModelEl.value = settings.colorAdjustMode;
+  } else if (colorAdjustModelEl) {
+    colorAdjustMode = colorAdjustModelEl.value || colorAdjustMode;
   }
 }
 
@@ -376,6 +386,32 @@ function hexToRgb(hex) {
   return { r, g, b };
 }
 
+function rgbToHsl({ r, g, b }) {
+  const nr = clampNumber((Number(r) || 0) / 255, 0, 1);
+  const ng = clampNumber((Number(g) || 0) / 255, 0, 1);
+  const nb = clampNumber((Number(b) || 0) / 255, 0, 1);
+  const max = Math.max(nr, ng, nb);
+  const min = Math.min(nr, ng, nb);
+  const delta = max - min;
+
+  let h = 0;
+  if (delta > 0) {
+    if (max === nr) h = ((ng - nb) / delta) % 6;
+    else if (max === ng) h = (nb - nr) / delta + 2;
+    else h = (nr - ng) / delta + 4;
+  }
+
+  h = Math.round(((h * 60) + 360) % 360);
+  const l = (max + min) / 2;
+  const s = delta === 0 ? 0 : delta / (1 - Math.abs((2 * l) - 1));
+
+  return {
+    h,
+    s: Math.round(clampNumber(s * 100, 0, 100)),
+    l: Math.round(clampNumber(l * 100, 0, 100))
+  };
+}
+
 function rgbToCmyk({ r, g, b }) {
   const nr = clampNumber((Number(r) || 0) / 255, 0, 1);
   const ng = clampNumber((Number(g) || 0) / 255, 0, 1);
@@ -406,9 +442,152 @@ function cmykToHex(c, m, y, k) {
   return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
 }
 
+function hslToHex(h, s, l) {
+  const nh = ((Number(h) || 0) % 360 + 360) % 360;
+  const ns = clampNumber((Number(s) || 0) / 100, 0, 1);
+  const nl = clampNumber((Number(l) || 0) / 100, 0, 1);
+  const c = (1 - Math.abs((2 * nl) - 1)) * ns;
+  const x = c * (1 - Math.abs(((nh / 60) % 2) - 1));
+  const m = nl - (c / 2);
+
+  let r1 = 0;
+  let g1 = 0;
+  let b1 = 0;
+  if (nh < 60) [r1, g1, b1] = [c, x, 0];
+  else if (nh < 120) [r1, g1, b1] = [x, c, 0];
+  else if (nh < 180) [r1, g1, b1] = [0, c, x];
+  else if (nh < 240) [r1, g1, b1] = [0, x, c];
+  else if (nh < 300) [r1, g1, b1] = [x, 0, c];
+  else [r1, g1, b1] = [c, 0, x];
+
+  const r = Math.round((r1 + m) * 255);
+  const g = Math.round((g1 + m) * 255);
+  const b = Math.round((b1 + m) * 255);
+  return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+}
+
+function rgbChannelsToHex(r, g, b) {
+  const nr = clampNumber(Math.round(Number(r) || 0), 0, 255);
+  const ng = clampNumber(Math.round(Number(g) || 0), 0, 255);
+  const nb = clampNumber(Math.round(Number(b) || 0), 0, 255);
+  return `#${nr.toString(16).padStart(2, '0')}${ng.toString(16).padStart(2, '0')}${nb.toString(16).padStart(2, '0')}`;
+}
+
+const COLOR_ADJUST_CONFIG = {
+  cmyk: {
+    channels: [
+      { label: 'C', min: 0, max: 100, step: 1 },
+      { label: 'M', min: 0, max: 100, step: 1 },
+      { label: 'Y', min: 0, max: 100, step: 1 },
+      { label: 'K', min: 0, max: 100, step: 1 }
+    ]
+  },
+  rgb: {
+    channels: [
+      { label: 'R', min: 0, max: 255, step: 1 },
+      { label: 'G', min: 0, max: 255, step: 1 },
+      { label: 'B', min: 0, max: 255, step: 1 }
+    ]
+  },
+  hsl: {
+    channels: [
+      { label: 'H', min: 0, max: 360, step: 1 },
+      { label: 'S', min: 0, max: 100, step: 1 },
+      { label: 'L', min: 0, max: 100, step: 1 }
+    ]
+  }
+};
+
+function getColorAdjustMode() {
+  const next = (colorAdjustModelEl?.value || colorAdjustMode || 'cmyk').toLowerCase();
+  return Object.prototype.hasOwnProperty.call(COLOR_ADJUST_CONFIG, next) ? next : 'cmyk';
+}
+
+function setAdjustControlVisibility(labelEl, inputEl, show) {
+  labelEl?.classList.toggle('hidden', !show);
+  inputEl?.classList.toggle('hidden', !show);
+}
+
+function updateColorAdjustControlUi() {
+  const mode = getColorAdjustMode();
+  colorAdjustMode = mode;
+  const config = COLOR_ADJUST_CONFIG[mode];
+  const controls = [
+    { labelEl: colorChannel1LabelEl, inputEl: cmykCEl },
+    { labelEl: colorChannel2LabelEl, inputEl: cmykMEl },
+    { labelEl: colorChannel3LabelEl, inputEl: cmykYEl },
+    { labelEl: colorChannel4LabelEl, inputEl: cmykKEl }
+  ];
+
+  controls.forEach((control, index) => {
+    const channel = config.channels[index];
+    setAdjustControlVisibility(control.labelEl, control.inputEl, Boolean(channel));
+    if (!channel || !control.inputEl) return;
+    if (control.labelEl) control.labelEl.textContent = channel.label;
+    control.inputEl.min = String(channel.min);
+    control.inputEl.max = String(channel.max);
+    control.inputEl.step = String(channel.step);
+  });
+  updateColorAdjustTrackGradients();
+}
+
+function getColorAdjustResultHex() {
+  const mode = getColorAdjustMode();
+  const v1 = Number(cmykCEl?.value);
+  const v2 = Number(cmykMEl?.value);
+  const v3 = Number(cmykYEl?.value);
+  const v4 = Number(cmykKEl?.value);
+
+  if (mode === 'rgb') return toHexColor(rgbChannelsToHex(v1, v2, v3));
+  if (mode === 'hsl') return toHexColor(hslToHex(v1, v2, v3));
+  return toHexColor(cmykToHex(v1, v2, v3, v4));
+}
+
+function setTrackGradient(inputEl, gradient) {
+  if (!inputEl) return;
+  inputEl.style.setProperty('--track-gradient', gradient);
+}
+
+function updateColorAdjustTrackGradients() {
+  const mode = getColorAdjustMode();
+  const v1 = Number(cmykCEl?.value);
+  const v2 = Number(cmykMEl?.value);
+  const v3 = Number(cmykYEl?.value);
+  const v4 = Number(cmykKEl?.value);
+
+  if (mode === 'hsl') {
+    const hue = clampNumber(v1, 0, 360);
+    const sat = clampNumber(v2, 0, 100);
+    const light = clampNumber(v3, 0, 100);
+    setTrackGradient(cmykCEl, 'linear-gradient(90deg, #ff0000 0%, #ffff00 17%, #00ff00 33%, #00ffff 50%, #0000ff 67%, #ff00ff 83%, #ff0000 100%)');
+    setTrackGradient(cmykMEl, `linear-gradient(90deg, hsl(${hue}, 0%, ${light}%), hsl(${hue}, 100%, ${light}%))`);
+    setTrackGradient(cmykYEl, `linear-gradient(90deg, hsl(${hue}, ${sat}%, 0%), hsl(${hue}, ${sat}%, 50%), hsl(${hue}, ${sat}%, 100%))`);
+    setTrackGradient(cmykKEl, 'linear-gradient(90deg, #2a2a2a, #8a8a8a)');
+    return;
+  }
+
+  if (mode === 'rgb') {
+    const r = clampNumber(v1, 0, 255);
+    const g = clampNumber(v2, 0, 255);
+    const b = clampNumber(v3, 0, 255);
+    setTrackGradient(cmykCEl, `linear-gradient(90deg, rgb(0, ${g}, ${b}), rgb(255, ${g}, ${b}))`);
+    setTrackGradient(cmykMEl, `linear-gradient(90deg, rgb(${r}, 0, ${b}), rgb(${r}, 255, ${b}))`);
+    setTrackGradient(cmykYEl, `linear-gradient(90deg, rgb(${r}, ${g}, 0), rgb(${r}, ${g}, 255))`);
+    setTrackGradient(cmykKEl, 'linear-gradient(90deg, #2a2a2a, #8a8a8a)');
+    return;
+  }
+
+  const black = clampNumber(v4, 0, 100);
+  setTrackGradient(cmykCEl, `linear-gradient(90deg, hsl(0, 0%, ${100 - black}%), hsl(190, 100%, ${52 - black * 0.25}%))`);
+  setTrackGradient(cmykMEl, `linear-gradient(90deg, hsl(0, 0%, ${100 - black}%), hsl(320, 95%, ${58 - black * 0.25}%))`);
+  setTrackGradient(cmykYEl, `linear-gradient(90deg, hsl(0, 0%, ${100 - black}%), hsl(54, 100%, ${58 - black * 0.2}%))`);
+  setTrackGradient(cmykKEl, 'linear-gradient(90deg, #f3f3f3, #1a1a1a)');
+}
+
 function updateCmykPreview() {
   if (!cmykPreviewEl) return;
-  const color = toHexColor(cmykToHex(cmykCEl?.value, cmykMEl?.value, cmykYEl?.value, cmykKEl?.value)) || '#111111';
+  updateColorAdjustTrackGradients();
+  const color = getColorAdjustResultHex() || '#111111';
   cmykPreviewEl.style.background = color;
 }
 
@@ -420,13 +599,29 @@ function updateWorkingColorPreview() {
 
 function syncCmykControlsFromWorkingColor() {
   if (!(cmykCEl && cmykMEl && cmykYEl && cmykKEl)) return;
-  const rgb = hexToRgb(selectedTargetColor);
+  const mode = getColorAdjustMode();
+  const rgb = hexToRgb(selectedTargetColor || replaceColorEl?.value);
   if (!rgb) return;
-  const cmyk = rgbToCmyk(rgb);
-  cmykCEl.value = String(cmyk.c);
-  cmykMEl.value = String(cmyk.m);
-  cmykYEl.value = String(cmyk.y);
-  cmykKEl.value = String(cmyk.k);
+
+  if (mode === 'rgb') {
+    cmykCEl.value = String(Math.round(clampNumber(rgb.r, 0, 255)));
+    cmykMEl.value = String(Math.round(clampNumber(rgb.g, 0, 255)));
+    cmykYEl.value = String(Math.round(clampNumber(rgb.b, 0, 255)));
+    cmykKEl.value = '0';
+  } else if (mode === 'hsl') {
+    const hsl = rgbToHsl(rgb);
+    cmykCEl.value = String(hsl.h);
+    cmykMEl.value = String(hsl.s);
+    cmykYEl.value = String(hsl.l);
+    cmykKEl.value = '0';
+  } else {
+    const cmyk = rgbToCmyk(rgb);
+    cmykCEl.value = String(cmyk.c);
+    cmykMEl.value = String(cmyk.m);
+    cmykYEl.value = String(cmyk.y);
+    cmykKEl.value = String(cmyk.k);
+  }
+
   updateCmykPreview();
   updateWorkingColorPreview();
 }
@@ -750,17 +945,73 @@ function detectEdgeTouchingBackgroundColor() {
   if (!loadedSvg) return null;
   const viewport = getSvgViewportBounds(loadedSvg);
   if (!viewport) return null;
+  const viewportArea = Math.max(1, viewport.width * viewport.height);
 
-  const totalsByColor = new Map();
-  const items = getShapeItems({ includeBackground: true });
-  items.forEach((item) => {
-    if (!item.fillHex) return;
-    if (!boxTouchesViewportEdge(item.box, viewport)) return;
-    totalsByColor.set(item.fillHex, (totalsByColor.get(item.fillHex) || 0) + Math.max(1, item.area));
+  const isInDefinitionTree = (el) => Boolean(el?.closest?.('defs,clipPath,mask,pattern,symbol,marker'));
+  const edgeTouchFlags = (box) => {
+    if (!box) return { left: false, right: false, top: false, bottom: false };
+    const epsilon = 0.5;
+    return {
+      left: box.x <= viewport.left + epsilon,
+      right: box.x + box.width >= viewport.right - epsilon,
+      top: box.y <= viewport.top + epsilon,
+      bottom: box.y + box.height >= viewport.bottom - epsilon
+    };
+  };
+
+  const edgeItems = getShapeItems({ includeBackground: true }).filter((item) => {
+    if (!item.fillHex) return false;
+    if (isInDefinitionTree(item.el)) return false;
+    return boxTouchesViewportEdge(item.box, viewport);
+  });
+  if (edgeItems.length === 0) return null;
+
+  const byColor = new Map();
+  edgeItems.forEach((item) => {
+    const stats = byColor.get(item.fillHex) || {
+      color: item.fillHex,
+      totalArea: 0,
+      maxArea: 0,
+      left: false,
+      right: false,
+      top: false,
+      bottom: false,
+      items: []
+    };
+    stats.totalArea += Math.max(1, item.area);
+    stats.maxArea = Math.max(stats.maxArea, item.area);
+    const touch = edgeTouchFlags(item.box);
+    stats.left = stats.left || touch.left;
+    stats.right = stats.right || touch.right;
+    stats.top = stats.top || touch.top;
+    stats.bottom = stats.bottom || touch.bottom;
+    stats.items.push(item);
+    byColor.set(item.fillHex, stats);
   });
 
-  if (totalsByColor.size === 0) return null;
-  return [...totalsByColor.entries()].sort((a, b) => b[1] - a[1])[0][0];
+  const qualifying = [...byColor.values()]
+    .filter((stats) => {
+      const edgeCount = Number(stats.left) + Number(stats.right) + Number(stats.top) + Number(stats.bottom);
+      const largestCoverage = stats.maxArea / viewportArea;
+      const totalCoverage = stats.totalArea / viewportArea;
+      return (largestCoverage >= 0.6 && edgeCount >= 2) || (totalCoverage >= 0.75 && edgeCount >= 3);
+    })
+    .sort((a, b) => {
+      if (b.maxArea !== a.maxArea) return b.maxArea - a.maxArea;
+      return b.totalArea - a.totalArea;
+    });
+
+  if (qualifying.length === 0) return null;
+  const winner = qualifying[0];
+  const minRemovalArea = viewportArea * 0.2;
+  const removableItems = winner.items.filter((item) => item.area >= minRemovalArea);
+  const items = removableItems.length > 0 ? removableItems : [winner.items[0]].filter(Boolean);
+  if (items.length === 0) return null;
+
+  return {
+    color: winner.color,
+    items
+  };
 }
 
 function findBackgroundInsertAnchor(svg) {
@@ -769,23 +1020,14 @@ function findBackgroundInsertAnchor(svg) {
   return [...svg.children].find((node) => !skip.has(node.tagName.toLowerCase())) || null;
 }
 
-function normalizeBackgroundToViewportRect() {
-  if (!loadedSvg) return { color: null, removed: 0, inserted: false };
+function insertBackgroundRectForViewport(color) {
+  if (!loadedSvg) return false;
+  const normalizedColor = toHexColor(color);
+  if (!normalizedColor) return false;
+  const viewport = getSvgViewportBounds(loadedSvg);
+  if (!viewport) return false;
 
   [...loadedSvg.querySelectorAll(`[${BACKGROUND_LAYER_ATTR}="1"]`)].forEach((node) => node.remove());
-
-  const backgroundColor = detectEdgeTouchingBackgroundColor();
-  if (!backgroundColor) return { color: null, removed: 0, inserted: false };
-
-  let removed = 0;
-  getShapeItems({ includeBackground: true }).forEach((item) => {
-    if (item.fillHex !== backgroundColor) return;
-    item.el.remove();
-    removed += 1;
-  });
-
-  const viewport = getSvgViewportBounds(loadedSvg);
-  if (!viewport) return { color: backgroundColor, removed, inserted: false };
 
   const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
   rect.setAttribute('x', String(viewport.x));
@@ -794,13 +1036,35 @@ function normalizeBackgroundToViewportRect() {
   rect.setAttribute('height', String(viewport.height));
   rect.setAttribute(BACKGROUND_LAYER_ATTR, '1');
   rect.setAttribute('pointer-events', 'none');
-  setElementFill(rect, backgroundColor);
+  setElementFill(rect, normalizedColor);
 
   const anchor = findBackgroundInsertAnchor(loadedSvg);
   if (anchor) loadedSvg.insertBefore(rect, anchor);
   else loadedSvg.appendChild(rect);
 
-  return { color: backgroundColor, removed, inserted: true };
+  return true;
+}
+
+function normalizeBackgroundToViewportRect() {
+  if (!loadedSvg) return { color: null, removed: 0, inserted: false };
+
+  [...loadedSvg.querySelectorAll(`[${BACKGROUND_LAYER_ATTR}="1"]`)].forEach((node) => node.remove());
+
+  const backgroundCandidate = detectEdgeTouchingBackgroundColor();
+  if (!backgroundCandidate?.color) return { color: null, removed: 0, inserted: false };
+  const backgroundColor = backgroundCandidate.color;
+  lastKnownBackgroundColor = backgroundColor;
+
+  let removed = 0;
+  backgroundCandidate.items.forEach((item) => {
+    if (!(item?.el instanceof Element)) return;
+    if (!item.el.isConnected) return;
+    item.el.remove();
+    removed += 1;
+  });
+
+  const inserted = insertBackgroundRectForViewport(backgroundColor);
+  return { color: backgroundColor, removed, inserted };
 }
 
 function getBackgroundFillHex() {
@@ -808,6 +1072,43 @@ function getBackgroundFillHex() {
   const bgNode = loadedSvg.querySelector(`[${BACKGROUND_LAYER_ATTR}="1"]`);
   if (!(bgNode instanceof Element)) return null;
   return toHexColor(getFill(bgNode));
+}
+
+function restoreBackgroundColorPath() {
+  if (!loadedSvg) {
+    setStatus('Restore background skipped: load an SVG first.');
+    return;
+  }
+
+  const before = snapshot();
+  const normalized = normalizeBackgroundToViewportRect();
+  if (normalized.color) {
+    if (before) pushHistory(before);
+    buildPalette();
+    applyViewMode();
+    renderCropPreview();
+    setStatus(
+      `Background restored to ${normalized.color} (${normalized.removed} shape(s) normalized to viewport background).`
+    );
+    return;
+  }
+
+  const fallback =
+    toHexColor(lastKnownBackgroundColor)
+    || toHexColor(getBackgroundFillHex())
+    || toHexColor(canvasBgColorEl?.value)
+    || '#ffffff';
+  if (!insertBackgroundRectForViewport(fallback)) {
+    setStatus('Restore background skipped: viewport unavailable.');
+    return;
+  }
+
+  lastKnownBackgroundColor = fallback;
+  if (before) pushHistory(before);
+  buildPalette();
+  applyViewMode();
+  renderCropPreview();
+  setStatus(`Background restored using ${fallback}.`);
 }
 
 function buildPalette() {
@@ -2786,21 +3087,22 @@ function recolorFilledShapes(fromColor, toColor, { collectElements = false } = {
 
 function applyCmykToWorkingColor() {
   if (!loadedSvg) {
-    setStatus('CMYK apply skipped: load an SVG first.');
+    setStatus('Color change skipped: load an SVG first.');
     return;
   }
   const sourceColor = toHexColor(selectedTargetColor || replaceColorEl?.value);
   if (!sourceColor) {
-    setStatus('CMYK apply skipped: pick a working color first.');
+    setStatus('Color change skipped: pick a working color first.');
     return;
   }
-  const nextColor = toHexColor(cmykToHex(cmykCEl?.value, cmykMEl?.value, cmykYEl?.value, cmykKEl?.value));
+  const modeLabel = getColorAdjustMode().toUpperCase();
+  const nextColor = getColorAdjustResultHex();
   if (!nextColor) {
-    setStatus('CMYK apply skipped: invalid CMYK values.');
+    setStatus(`Color change skipped: invalid ${modeLabel} values.`);
     return;
   }
   if (nextColor === sourceColor) {
-    setStatus(`CMYK apply skipped: working color already ${sourceColor}.`);
+    setStatus(`Color change skipped: working color already ${sourceColor}.`);
     return;
   }
 
@@ -2814,7 +3116,7 @@ function applyCmykToWorkingColor() {
   selectedTargetColor = nextColor;
   if (replaceColorEl) replaceColorEl.value = nextColor;
   buildPalette();
-  setStatus(`CMYK applied: recolored ${recolored} path(s) from ${sourceColor} to ${nextColor}.`);
+  setStatus(`Color change applied (${modeLabel}): recolored ${recolored} path(s) from ${sourceColor} to ${nextColor}.`);
   saveUiSettings();
 }
 
@@ -3009,6 +3311,10 @@ function loadSvgText(text, filename = 'uploaded.svg') {
   undoBtn.disabled = true;
   downloadBtn.disabled = false;
   const background = normalizeBackgroundToViewportRect();
+  if (!background.color) {
+    const existingBackground = getBackgroundFillHex();
+    lastKnownBackgroundColor = existingBackground || null;
+  }
   setCanvasTransparencyMode(!background.color);
   resetCropUiControls({ persist: false, rerender: false });
   buildPalette();
@@ -3083,10 +3389,6 @@ function onMouseDown(event) {
 
   if (mode === 'floodFill') {
     if (!canvasWrap.contains(event.target)) return;
-    if (deleteAllMatchingEl?.checked) {
-      applyFloodDelete(event.clientX, event.clientY);
-      return;
-    }
     void applyFloodFill(event.clientX, event.clientY);
     return;
   }
@@ -3238,6 +3540,11 @@ replaceColorEl.addEventListener('input', () => {
   syncCmykControlsFromWorkingColor();
   saveUiSettings();
 });
+colorAdjustModelEl?.addEventListener('change', () => {
+  updateColorAdjustControlUi();
+  syncCmykControlsFromWorkingColor();
+  saveUiSettings();
+});
 mergeColorAEl?.addEventListener('input', () => {
   mergeColorA = mergeColorAEl.value;
   renderSwatchSelection(mergePaletteAEl, mergeColorA);
@@ -3258,9 +3565,6 @@ canvasBgColorEl?.addEventListener('input', () => {
   saveUiSettings();
 });
 
-deleteAllMatchingEl?.addEventListener('change', () => {
-  saveUiSettings();
-});
 const cmykControls = [cmykCEl, cmykMEl, cmykYEl, cmykKEl];
 cmykControls.forEach((el) => {
   el?.addEventListener('input', updateCmykPreview);
@@ -3343,6 +3647,7 @@ modeOpenPathBtn?.addEventListener('click', () => {
   saveUiSettings();
 });
 openPathCleanAllBtn?.addEventListener('click', runOpenPathCleanupAll);
+restoreBackgroundBtn?.addEventListener('click', restoreBackgroundColorPath);
 modePanBtn.addEventListener('click', () => {
   setMode('pan');
   saveUiSettings();
@@ -3487,6 +3792,7 @@ updateEmptyCanvasState();
 selectedTargetColor = replaceColorEl?.value || selectedTargetColor;
 mergeColorA = mergeColorAEl?.value || mergeColorA;
 mergeColorB = mergeColorBEl?.value || mergeColorB;
+updateColorAdjustControlUi();
 syncCmykControlsFromWorkingColor();
 setMode(mode);
 applyViewMode();
